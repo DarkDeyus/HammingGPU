@@ -9,8 +9,6 @@
 
 using namespace std;
 
-#define ITER_GPU //To omit watchdog on windows
-
 #define CHECK_ERRORS(status) do{\
 	if(cudaSuccess != status) {\
 		fprintf(stderr, "Cuda Error in %s:%d - %s\n", __FILE__, __LINE__, cudaGetErrorString(status));\
