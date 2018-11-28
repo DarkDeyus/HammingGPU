@@ -266,7 +266,7 @@ __host__ __device__ char compareSequences(BitSequence<BITS_IN_SEQUENCE> * sequen
 
 __host__ __device__ void k2ij(unsigned long long k, unsigned int * i, unsigned int  * j)
 {
-	*i = (unsigned int)ceil((0.5 * (-1 + sqrtl(1 + 8 * (k + 1)))));
+	*i = (unsigned int)ceil((0.5 * (-1 + sqrt(1 + 8 * (k + 1)))));
 	*j = (unsigned int)((k + 1) - 0.5 * (*i) * ((unsigned long long)(*i) - 1)) - 1;
 }
 
