@@ -15,6 +15,8 @@ using namespace std;
 #define THREADS_PER_BLOCK 1024 //Number of threads run in one block
 #define SEQUENCES_PER_CALL 35 //Number of rows taken once per function call
 
+void CheckErrors(cudaError_t status);
+
 template<unsigned long long k>
 class BitSequence;
 class CudaTimer;
@@ -143,7 +145,7 @@ void PrintAsMatrix(const BitSequence<COMPARISONS> & sequence, ostream & stream);
 vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence);
 vector<pair<int, int> > FindPairsCPU(BitSequence<BITS_IN_SEQUENCE> * sequence);
 __host__ __device__ unsigned int* GetPointer(unsigned int **arr, unsigned int row, unsigned int col);
-void CheckErrors(cudaError_t status);
+
 template<unsigned int N>
 vector<pair<int, int> > ToPairVector(const HostResultArray<N> & result_array);
 
