@@ -497,7 +497,6 @@ void PrintAsMatrix(const BitSequence<COMPARISONS> & sequence, ostream & stream)
 		cout << endl;
 	}
 }
-
 vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence)
 {
 	BitSequence<BITS_IN_SEQUENCE> *d_idata;
@@ -533,14 +532,14 @@ vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence)
 	}
 	CHECK_ERRORS(cudaDeviceSynchronize());
 #else
-	if (COMPARISONS >= THREADS_IN_BLOCK)
+	if (COMPARISONS >= THREADS_PER_BLOCK)
 	{
-		Hamming1GPU << < (int)(COMPARISONS / THREADS_IN_BLOCK), THREADS_IN_BLOCK >> > (d_idata, d_odata, 0);
+		Hamming1GPU << < (int)(COMPARISONS / THREADS_PER_BLOCK), THREADS_PER_BLOCK >> > (d_idata, d_odata, 0);
 		CHECK_ERRORS(cudaDeviceSynchronize());
 	}
-	if (COMPARISONS % THREADS_IN_BLOCK)
+	if (COMPARISONS % THREADS_PER_BLOCK)
 	{
-		Hamming1GPU << < 1, COMPARISONS % THREADS_IN_BLOCK >> > (d_idata, d_odata, (COMPARISONS / THREADS_IN_BLOCK) * THREADS_IN_BLOCK);
+		Hamming1GPU << < 1, COMPARISONS % THREADS_PER_BLOCK >> > (d_idata, d_odata, (COMPARISONS / THREADS_PER_BLOCK) * THREADS_PER_BLOCK);
 		CHECK_ERRORS(cudaDeviceSynchronize());
 	}
 #endif
