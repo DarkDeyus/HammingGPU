@@ -174,15 +174,15 @@ int main()
 	BitSequence<BITS_IN_SEQUENCE>* sequence = GenerateInput();
 	printf("Completed!\n");
 	
-	printf("Starting searching for pairs of sequences with Hamming distance equal 1 on GPU...");
+	printf("Starting searching for pairs of sequences with Hamming distance equal 1 on GPU...\n");
 	auto resultsGPU = FindPairsGPU(sequence);
 	printf("Completed!\n");
 
-	printf("Starting searching for pairs of sequences with Hamming distance equal 1 on GPU...");
+	printf("Starting searching for pairs of sequences with Hamming distance equal 1 on GPU...\n");
 	auto resultsCPU = FindPairsCPU(sequence);
 	printf("Completed!\n");
 
-	printf("Comparing GPU results with CPU results...");
+	printf("Comparing GPU results with CPU results...\n");
 	ComparePairs(resultsGPU, resultsCPU);
 
 	// cudaDeviceReset must be called before exiting in order for profiling and
@@ -616,7 +616,7 @@ vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence)
 	{
 		if (j >= THREADS_PER_BLOCK)
 		{
-			Hamming2GPUFast << < j / THREADS_PER_BLOCK, THREADS_PER_BLOCK >> > (d_idata, d_result.arr, j, 0);
+			Hamming2GPU << < j / THREADS_PER_BLOCK, THREADS_PER_BLOCK >> > (d_idata, d_result.arr, j, 0);
 			//CHECK_ERRORS(cudaDeviceSynchronize());
 		}
 		if (j % THREADS_PER_BLOCK > 0)
