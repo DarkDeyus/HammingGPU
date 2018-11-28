@@ -175,7 +175,9 @@ int main()
 
 	cudaDeviceSetCacheConfig(cudaFuncCachePreferShared);
 
-
+	auto gpuRes = FindPairsGPU2(sequence);
+	cout << "On first call found " << gpuRes.size() << " results" << endl;
+	cout.flush();
 	auto gpuRes0 = FindPairsGPU(sequence);
 	cout << "On second call found " << gpuRes0.size() << " results" << endl;
 	cout.flush();
