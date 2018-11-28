@@ -10,7 +10,6 @@
 using namespace std;
 
 #define ITER_GPU //To omit watchdog on windows
-//#define LINUX
 
 #define CHECK_ERRORS(status) do{\
 	if(cudaSuccess != status) {\
@@ -176,9 +175,7 @@ int main()
 
 	cudaDeviceSetCacheConfig(cudaFuncCachePreferShared);
 
-	auto gpuRes = FindPairsGPU2(sequence);
-	cout << "On first call found " << gpuRes.size() << " results" << endl;
-	cout.flush();
+
 	auto gpuRes0 = FindPairsGPU(sequence);
 	cout << "On second call found " << gpuRes0.size() << " results" << endl;
 	cout.flush();
@@ -428,12 +425,10 @@ __global__ void Hamming1GPU(BitSequence<BITS_IN_SEQUENCE> * d_sequence, BitSeque
 	unsigned int c, b;
 	k2ij(i, &i1, &i2);
 	c = compareSequences(d_sequence + i1, d_sequence + i2);
-#ifdef LINUX
+
 	__syncthreads();
 	b = __ballot(c);
-#else
-	b = __ballot_sync(~0, c);
-#endif
+
 	if (!!(i % 32))
 		*(d_odata->GetWord32(i / 32)) = b;
 }
@@ -623,12 +618,10 @@ __global__ void Hamming2GPUFast(BitSequence<BITS_IN_SEQUENCE> *sequences, unsign
 		unsigned int b;
 		unsigned int seq2_no = row_offset - i;
 		char v = res[i] == 1;
-#ifdef LINUX
+
 		__syncthreads();
 		b = __ballot(v);
-#else
-		b = __ballot_sync(~0, v);
-#endif
+
 		if (!(seq_no % 32))
 			*(GetPointer(arr, seq2_no, seq_no)) = b;
 	}
@@ -675,12 +668,10 @@ __global__ void Hamming2GPU(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned i
 		unsigned int b;
 		unsigned int seq2_no = row_offset - i;
 		char v = res[i] == 1;
-#ifdef LINUX
+
 		__syncthreads();
 		b = __ballot(v);
-#else
-		b = __ballot_sync(~0, v);
-#endif
+
 		//printf("%d %d %d %d %d\n", seq_no, seq2_no, (int)v, b, (int)res[i]);
 		if (seq2_no > seq_no && !(seq_no % 32))
 		{
