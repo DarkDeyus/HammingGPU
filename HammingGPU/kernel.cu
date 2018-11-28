@@ -18,7 +18,7 @@ using namespace std;
 void CheckErrors(cudaError_t status);
 
 template<unsigned long long k>
-class BitSequence;
+class SequenceOfBits;
 class CudaTimer;
 
 template<unsigned int N>
@@ -130,26 +130,26 @@ public:
 };
 
 
-__host__ __device__ char compareSequences(BitSequence<BITS_IN_SEQUENCE> * sequence1, BitSequence<BITS_IN_SEQUENCE> * sequence2);
+__host__ __device__ char compareSequences(SequenceOfBits<BITS_IN_SEQUENCE> * sequence1, SequenceOfBits<BITS_IN_SEQUENCE> * sequence2);
 __host__ __device__ void k2ij(unsigned long long k, unsigned int * i, unsigned int  * j);
 __host__ __device__ unsigned long long ij2k(unsigned int i, unsigned int j);
-void Hamming1CPU(BitSequence<BITS_IN_SEQUENCE> * sequence, BitSequence<COMPARISONS> * odata);
-void PrintComparison(const BitSequence<BITS_IN_SEQUENCE> & gpu_sequence, const BitSequence<BITS_IN_SEQUENCE> & cpu_sequence);
+void Hamming1CPU(SequenceOfBits<BITS_IN_SEQUENCE> * sequence, SequenceOfBits<COMPARISONS> * odata);
+void PrintComparison(const SequenceOfBits<BITS_IN_SEQUENCE> & gpu_sequence, const SequenceOfBits<BITS_IN_SEQUENCE> & cpu_sequence);
 bool ComparePairs(const vector<pair<int, int> > & gpu_result, const vector<pair<int, int> > & cpu_result);
 
-ostream & operator<<(ostream & out, BitSequence<BITS_IN_SEQUENCE> & sequence);
-BitSequence<BITS_IN_SEQUENCE> * GenerateInput();
-vector<pair<int, int> > ToPairVector(const BitSequence<COMPARISONS> & result_sequence);
-void PrintAsMatrix(const BitSequence<COMPARISONS> & sequence, ostream & stream);
+ostream & operator<<(ostream & out, SequenceOfBits<BITS_IN_SEQUENCE> & sequence);
+SequenceOfBits<BITS_IN_SEQUENCE> * GenerateInput();
+vector<pair<int, int> > ToPairVector(const SequenceOfBits<COMPARISONS> & result_sequence);
+void PrintAsMatrix(const SequenceOfBits<COMPARISONS> & sequence, ostream & stream);
 
-vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence);
-vector<pair<int, int> > FindPairsCPU(BitSequence<BITS_IN_SEQUENCE> * sequence);
+vector<pair<int, int> > FindPairsGPU(SequenceOfBits<BITS_IN_SEQUENCE> * h_sequence);
+vector<pair<int, int> > FindPairsCPU(SequenceOfBits<BITS_IN_SEQUENCE> * sequence);
 __host__ __device__ unsigned int* GetPointer(unsigned int **array, unsigned int row, unsigned int col);
 
 template<unsigned int N>
 vector<pair<int, int> > ToPairVector(const HostResults<N> & result_array);
 
-void PrintArray(BitSequence<BITS_IN_SEQUENCE> * arr);
+void PrintArray(SequenceOfBits<BITS_IN_SEQUENCE> * arr);
 
 int main()
 {
@@ -158,7 +158,7 @@ int main()
 	cudaDeviceSetCacheConfig(cudaFuncCachePreferShared);
 
 	printf("Generation sequence in progress...");
-	BitSequence<BITS_IN_SEQUENCE>* sequence = GenerateInput();
+	SequenceOfBits<BITS_IN_SEQUENCE>* sequence = GenerateInput();
 	printf("Completed!\n");
 	
 	printf("Starting searching for pairs of sequences with Hamming distance equal 1 on GPU...\n");
@@ -183,11 +183,37 @@ int main()
 	return 0;
 }
 
-template<unsigned long long k>
-class BitSequence
+template<unsigned long long N>
+class SequenceOfBits
 {
 public:
-	__host__ __device__ BitSequence() {}
+	// !!(N%64) returns 0 if N is divisible by 64 and 1 if it is not. Array must contain whole 64-bits long words.
+	static const unsigned long long array_size = (N / 64 + (!!(N % 64))) * 8;
+
+	__host__ __device__ SequenceOfBits() {}
+
+	__host__ __device__ SequenceOfBits(const SequenceOfBits<N> & sequence)
+	{
+		memcpy(array, sequence.array, array_size * 8);
+	}
+
+	__host__ __device__ const SequenceOfBits<N> & operator=(const SequenceOfBits<N> & sequence)
+	{
+		memcpy(array, sequence.array, array_size * 8);
+		return sequence;
+	}
+
+	//Get a 32-bits long word, so 32/8 = 4 bytes long.
+	__host__ __device__ inline unsigned int *Get32BitsWord(unsigned int word_index)
+	{
+		return (unsigned int*)(array + word_index * 32 / 8);
+	}
+
+	//Get a 64-bits long word , so 64/8 = 8 bytes long word
+	__host__ __device__ inline unsigned long long *Get64BitsWord(unsigned long long word_index)
+	{
+		return (unsigned long long*)(array + word_index * 64 / 8);
+	}
 
 	//Char has 1 byte so 8 bits. Divide by 8 to get the byte with our searched bit,
 	//move it to the right so our bit is the least significant bit of the byte.
@@ -197,58 +223,35 @@ public:
 		return array[index / 8] >> (index % 8) & 1;
 	}
 
-	//Can't write only one bit, have to write whole byte. Get the byte containing our bit , get a mask of it with ones everywhere and zero on the bit spot. After &-ing the mask with the byte we get the same byte, but with 0 in place of our bit.
+	//Can't write only one bit, have to write whole byte. Get the byte containing our bit , get a mask of it with ones everywhere and zero on the bit spot.
+	//After &-ing the mask with the byte we get the same byte, but with 0 in place of our bit.
 	//Afterwards we can & it with a byte containing zeroes everywhere and our desired value in the place of the searched bit to write the correct value in the desired bit spot.
-	//!! makes 0 from 0 and 1 from non-zero
+	//!! makes 0 from 0 and 1 from non-zero value
 	__host__ __device__ inline void SetBit(unsigned long long index, char value)
 	{
 		array[index / 8] = (array[index / 8] & (~(1 << (index % 8)))) | ((!!value) << (index % 8));
-	}
-	
-	//Get a 32-bits long word, so 32/8 = 4 bytes long.
-	__host__ __device__ inline unsigned int *GetWord32(unsigned int word_index)
-	{
-		return (unsigned int*)(array + word_index * 32 / 8);
-	}
-
-	//Get a 64-bits long word , so 64/8 = 8 bytes long word
-	__host__ __device__ inline unsigned long long *GetWord64(unsigned long long word_index)
-	{
-		return (unsigned long long*)(array + word_index * 64 / 8);
-	}
-
-	__host__ __device__ BitSequence(const BitSequence<k> & sequence)
-	{
-		memcpy(array, sequence.array, arSize * 8);
-	}
-
-	__host__ __device__ const BitSequence<k> & operator=(const BitSequence<k> & sequence)
-	{
-		memcpy(array, sequence.array, arSize * 8);
-		return sequence;
-	}
-	static const unsigned long long arSize = (k / 64 + (!!(k % 64))) * 8;
-
+	}		
 private:
-	char array[arSize];
+	char array[array_size];
 };
 
-__host__ __device__ char compareSequences(BitSequence<BITS_IN_SEQUENCE> * sequence1, BitSequence<BITS_IN_SEQUENCE> * sequence2)
+__host__ __device__ char compareSequences(SequenceOfBits<BITS_IN_SEQUENCE> * sequence1, SequenceOfBits<BITS_IN_SEQUENCE> * sequence2)
 {
-	int diff = 0;
+	int difference_count = 0;
 	for (int j = 0; j < (BITS_IN_SEQUENCE + 63) / 64; ++j)
 	{
-		unsigned long long int a, b, axorb;
-		a = *(sequence1->GetWord64(j));
-		b = *(sequence2->GetWord64(j));
-		axorb = a ^ b;
-		diff += axorb == 0 ? 0 : (axorb & (axorb - 1) ? 2 : 1);
-		if (diff > 1)
+		unsigned long long int a, b, xor_result;
+		a = *(sequence1->Get64BitsWord(j));
+		b = *(sequence2->Get64BitsWord(j));
+
+		xor_result = a ^ b;
+		difference_count += xor_result == 0 ? 0 : (xor_result & (xor_result - 1) ? 2 : 1);
+		if (difference_count > 1)
 		{
 			return 0;
 		}
 	}
-	return !!diff;
+	return !!difference_count;
 }
 
 __host__ __device__ void k2ij(unsigned long long k, unsigned int * i, unsigned int  * j)
@@ -262,7 +265,7 @@ __host__ __device__ unsigned long long ij2k(unsigned int i, unsigned int j)
 	return ((unsigned long long)i) * (i - 1) / 2 + j;
 }
 
-void Hamming1CPU(BitSequence<BITS_IN_SEQUENCE> * sequence, BitSequence<COMPARISONS> * odata)
+void Hamming1CPU(SequenceOfBits<BITS_IN_SEQUENCE> * sequence, SequenceOfBits<COMPARISONS> * odata)
 {
 	unsigned long long numberOfComparisons = COMPARISONS;
 	int i1 = 1, i2 = 0;
@@ -279,7 +282,7 @@ void Hamming1CPU(BitSequence<BITS_IN_SEQUENCE> * sequence, BitSequence<COMPARISO
 				i2 = 0;
 			}
 		}
-		*(odata->GetWord32(k)) = result;
+		*(odata->Get32BitsWord(k)) = result;
 	}
 	if (numberOfComparisons % 32)
 	{
@@ -294,7 +297,7 @@ void Hamming1CPU(BitSequence<BITS_IN_SEQUENCE> * sequence, BitSequence<COMPARISO
 				i2 = 0;
 			}
 		}
-		*(odata->GetWord32(numberOfComparisons / 32)) = result;
+		*(odata->Get32BitsWord(numberOfComparisons / 32)) = result;
 	}
 }
 
@@ -337,7 +340,7 @@ private:
 	cudaEvent_t start, stop;
 };
 
-void PrintComparison(const BitSequence<BITS_IN_SEQUENCE> & gpu_sequence, const BitSequence<BITS_IN_SEQUENCE> & cpu_sequence)
+void PrintComparison(const SequenceOfBits<BITS_IN_SEQUENCE> & gpu_sequence, const SequenceOfBits<BITS_IN_SEQUENCE> & cpu_sequence)
 {
 	for (unsigned long long i = 0; i < INPUT_SEQUENCE_SIZE*(INPUT_SEQUENCE_SIZE - 1) / 2; ++i)
 	{
@@ -407,7 +410,7 @@ bool ComparePairs(const vector<pair<int, int> > & gpu_result, const vector<pair<
 
 
 
-ostream & operator<<(ostream & out, BitSequence<BITS_IN_SEQUENCE> & sequence)
+ostream & operator<<(ostream & out, SequenceOfBits<BITS_IN_SEQUENCE> & sequence)
 {
 	for (unsigned long long i = 0; i < BITS_IN_SEQUENCE; ++i)
 	{
@@ -416,28 +419,22 @@ ostream & operator<<(ostream & out, BitSequence<BITS_IN_SEQUENCE> & sequence)
 	return out;
 }
 
-BitSequence<BITS_IN_SEQUENCE> * GenerateInput()
+SequenceOfBits<BITS_IN_SEQUENCE> * GenerateInput()
 {
 	srand(2018);
 
-	BitSequence<BITS_IN_SEQUENCE> * r = new BitSequence<BITS_IN_SEQUENCE>[INPUT_SEQUENCE_SIZE];
+	SequenceOfBits<BITS_IN_SEQUENCE> * r = new SequenceOfBits<BITS_IN_SEQUENCE>[INPUT_SEQUENCE_SIZE];
 
-	memset(r, 0, sizeof(BitSequence<BITS_IN_SEQUENCE>)*INPUT_SEQUENCE_SIZE);
+	memset(r, 0, sizeof(SequenceOfBits<BITS_IN_SEQUENCE>)*INPUT_SEQUENCE_SIZE);
 
 	for (int i = 0; i < INPUT_SEQUENCE_SIZE; i++)
 	{
-		*(r[i].GetWord32(0)) = i;
-		/*for (int j = 0; j < BITS_IN_SEQUENCE / 32; j++)
-		{
-			*(r[i].GetWord32(j)) = rand() + rand()*RAND_MAX;
-		}
-		if(BITS_IN_SEQUENCE % 32)
-			*(r[i].GetWord32(BITS_IN_SEQUENCE / 32)) = (rand() + rand()*RAND_MAX)%(1<<(BITS_IN_SEQUENCE%32));*/
+		*(r[i].Get32BitsWord(0)) = i;
 	}
 	return r;
 }
 
-vector<pair<int, int> > ToPairVector(const BitSequence<COMPARISONS> & result_sequence)
+vector<pair<int, int> > ToPairVector(const SequenceOfBits<COMPARISONS> & result_sequence)
 {
 	vector<pair<int, int> > result;
 	for (unsigned long long k = 0; k < COMPARISONS; k++)
@@ -453,7 +450,7 @@ vector<pair<int, int> > ToPairVector(const BitSequence<COMPARISONS> & result_seq
 	return result;
 }
 
-void PrintAsMatrix(const BitSequence<COMPARISONS> & sequence, ostream & stream)
+void PrintAsMatrix(const SequenceOfBits<COMPARISONS> & sequence, ostream & stream)
 {
 	for (int i = 0; i < INPUT_SEQUENCE_SIZE; ++i)
 	{
@@ -472,10 +469,10 @@ void PrintAsMatrix(const BitSequence<COMPARISONS> & sequence, ostream & stream)
 	}
 }
 
-vector<pair<int, int> > FindPairsCPU(BitSequence<BITS_IN_SEQUENCE> * sequence)
+vector<pair<int, int> > FindPairsCPU(SequenceOfBits<BITS_IN_SEQUENCE> * sequence)
 {
-	BitSequence<COMPARISONS> *odata;
-	odata = new BitSequence<COMPARISONS>();
+	SequenceOfBits<COMPARISONS> *odata;
+	odata = new SequenceOfBits<COMPARISONS>();
 	CudaTimer timerCall;
 	timerCall.Start();
 	Hamming1CPU(sequence, odata);
@@ -486,17 +483,12 @@ vector<pair<int, int> > FindPairsCPU(BitSequence<BITS_IN_SEQUENCE> * sequence)
 	return result;
 }
 
-__host__ __device__ inline char CompareWords64(const unsigned long long & first_word, const unsigned long long & second_word)
-{
-	unsigned long long xor_result = first_word ^ second_word;
 
-	return (xor_result ? ((xor_result & (xor_result - 1)) ? 2 : 1) : 0);
-}
 
 #define WORDS64_IN_SEQUENCE ((BITS_IN_SEQUENCE + 63) / 64)
 
 
-__global__ void HammingGPU(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned int **arr, unsigned int row_offset, unsigned int column_offset)
+__global__ void HammingGPU(SequenceOfBits<BITS_IN_SEQUENCE> *sequences, unsigned int **arr, unsigned int row_offset, unsigned int column_offset)
 {
 	unsigned int tid = threadIdx.x + blockIdx.x * blockDim.x;
 	unsigned int seq_no = tid + column_offset;
@@ -504,29 +496,31 @@ __global__ void HammingGPU(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned in
 	char m = SEQUENCES_PER_CALL > row_offset ? row_offset : SEQUENCES_PER_CALL;
 	memset(res, 0, SEQUENCES_PER_CALL * sizeof(char));
 
-	BitSequence<BITS_IN_SEQUENCE> & s = *(sequences + seq_no);
-	__shared__ BitSequence<BITS_IN_SEQUENCE> ar[SEQUENCES_PER_CALL];
+	SequenceOfBits<BITS_IN_SEQUENCE> & s = *(sequences + seq_no);
+	__shared__ SequenceOfBits<BITS_IN_SEQUENCE> ar[SEQUENCES_PER_CALL];
 	for (unsigned int offset = 0; offset < m * WORDS64_IN_SEQUENCE; offset += blockDim.x)
 	{
 		unsigned int oid = threadIdx.x + offset;
 		if (oid < m * WORDS64_IN_SEQUENCE)
 		{
-			*(ar[oid / WORDS64_IN_SEQUENCE].GetWord64(oid % WORDS64_IN_SEQUENCE)) =
-				*((sequences + row_offset - oid / WORDS64_IN_SEQUENCE)->GetWord64(oid % WORDS64_IN_SEQUENCE));
-			//printf("Thread %d wrote %llu\n", oid, *(ar[oid / WORDS64_IN_SEQUENCE].GetWord64(oid % WORDS64_IN_SEQUENCE)));
+			*(ar[oid / WORDS64_IN_SEQUENCE].Get64BitsWord(oid % WORDS64_IN_SEQUENCE)) =
+				*((sequences + row_offset - oid / WORDS64_IN_SEQUENCE)->Get64BitsWord(oid % WORDS64_IN_SEQUENCE));
+			//printf("Thread %d wrote %llu\n", oid, *(ar[oid / WORDS64_IN_SEQUENCE].Get64BitsWord(oid % WORDS64_IN_SEQUENCE)));
 		}
 	}
 	__syncthreads();
 	for (int j = 0; j < WORDS64_IN_SEQUENCE; ++j)
 	{
-		unsigned long long sf = *(s.GetWord64(j));
+		unsigned long long sf = *(s.Get64BitsWord(j));
 		for (int i = 0; i < m; ++i)
 		{
 			//unsigned int seq2_no = row_offset - i;
 			if (res[i] <= 1)
 			{
-				unsigned long long s = *(ar[i].GetWord64(j));
-				char r = CompareWords64(sf, s);
+				unsigned long long s = *(ar[i].Get64BitsWord(j));
+
+				unsigned long long xor_result = sf ^ s;
+				char r = (xor_result ? ((xor_result & (xor_result - 1)) ? 2 : 1) : 0);
 				//printf("%d %d %d %d % d\n", seq2_no, seq_no, j, i, r);
 				res[i] += r;
 			}
@@ -549,13 +543,13 @@ __global__ void HammingGPU(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned in
 	}
 }
 
-vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence)
+vector<pair<int, int> > FindPairsGPU(SequenceOfBits<BITS_IN_SEQUENCE> * h_sequence)
 {
-	BitSequence<BITS_IN_SEQUENCE> *d_idata;
+	SequenceOfBits<BITS_IN_SEQUENCE> *d_idata;
 	DeviceResults<INPUT_SEQUENCE_SIZE> d_result;
 	CudaTimer timerCall, timerMemory;
 	float xtime, xmtime;
-	unsigned long long inputSize = sizeof(BitSequence<BITS_IN_SEQUENCE>)* INPUT_SEQUENCE_SIZE;
+	unsigned long long inputSize = sizeof(SequenceOfBits<BITS_IN_SEQUENCE>)* INPUT_SEQUENCE_SIZE;
 	timerMemory.Start();
 	CheckErrors(cudaMalloc(&d_idata, inputSize));
 	CheckErrors(cudaMemcpy(d_idata, h_sequence, inputSize, cudaMemcpyHostToDevice));
@@ -607,7 +601,7 @@ __host__ __device__ unsigned int* GetPointer(unsigned int **array, unsigned int 
 	return array[row - 1] + col / 32;
 }
 
-void PrintArray(BitSequence<BITS_IN_SEQUENCE> * array)
+void PrintArray(SequenceOfBits<BITS_IN_SEQUENCE> * array)
 {
 	for (int i = 0; i < INPUT_SEQUENCE_SIZE; ++i)	
 		cout << array[i] << endl;	
