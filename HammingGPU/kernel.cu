@@ -22,22 +22,22 @@ class BitSequence;
 class CudaTimer;
 
 template<unsigned int N>
-class DeviceResultArray;
+class DeviceResults;
 
-class ResultArray
+class Results
 {
 public:
 	unsigned int **arr;
 };
 
 template<unsigned int N>
-class HostResultArray : public ResultArray
+class HostResults : public Results
 {
 public:
 
-	HostResultArray()
+	HostResults()
 	{
-		arr = new unsigned int*[N - 1];
+		arr = new unsigned int* [N - 1];
 
 		for (int i = 0; i < N - 1; i++)
 		{
@@ -45,7 +45,7 @@ public:
 		}
 	}
 
-	~HostResultArray()
+	~HostResults()
 	{
 		if (arr == nullptr)
 			return;
@@ -58,19 +58,19 @@ public:
 		delete[] arr;
 	}
 
-	HostResultArray<N>&& operator=(HostResultArray<N> &&h_result)
+	HostResults<N>&& operator=(HostResults<N> &&h_result)
 	{
 		this->arr = h_result.arr;
 		h_result.arr = nullptr;
 	}
 
-	HostResultArray(HostResultArray<N> &&h_result)
+	HostResults(HostResults<N> &&h_result)
 	{
 		this->arr = h_result.arr;
 		h_result.arr = nullptr;
 	}
 
-	void CopyRows(const DeviceResultArray<N> & array, unsigned int start, unsigned int quantity)
+	void CopyRows(const DeviceResults<N> & array, unsigned int start, unsigned int quantity)
 	{
 		unsigned int **temp_arr = new unsigned int*[quantity];
 		cudaMemcpy(temp_arr, array.arr + start - 1, quantity * sizeof(unsigned int*), cudaMemcpyDeviceToHost);
@@ -88,10 +88,10 @@ public:
 };
 
 template<unsigned int N>
-class DeviceResultArray : public ResultArray
+class DeviceResults : public Results
 {
 public:
-	DeviceResultArray()
+	DeviceResults()
 	{
 		CheckErrors(cudaMalloc(&arr, sizeof(unsigned int*)*(N - 1)));
 		unsigned int* temp_arr[N - 1];
@@ -104,7 +104,7 @@ public:
 		CheckErrors(cudaDeviceSynchronize());
 	}
 
-	~DeviceResultArray()
+	~DeviceResults()
 	{
 		unsigned int *temp_arr[N - 1];
 		CheckErrors(cudaMemcpy(temp_arr, arr, sizeof(unsigned int*)*(N - 1), cudaMemcpyDeviceToHost));
@@ -115,9 +115,9 @@ public:
 		CheckErrors(cudaFree(arr));
 	}
 
-	HostResultArray<N> ToHostArray()
+	HostResults<N> ToHostArray()
 	{
-		HostResultArray<N> host;
+		HostResults<N> host;
 		unsigned int * temp_arr[N - 1];
 		CheckErrors(cudaMemcpy(temp_arr, arr, sizeof(unsigned int*)*(N - 1), cudaMemcpyDeviceToHost));
 		for (int i = 0; i < N - 1; ++i)
@@ -144,10 +144,10 @@ void PrintAsMatrix(const BitSequence<COMPARISONS> & sequence, ostream & stream);
 
 vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence);
 vector<pair<int, int> > FindPairsCPU(BitSequence<BITS_IN_SEQUENCE> * sequence);
-__host__ __device__ unsigned int* GetPointer(unsigned int **arr, unsigned int row, unsigned int col);
+__host__ __device__ unsigned int* GetPointer(unsigned int **array, unsigned int row, unsigned int col);
 
 template<unsigned int N>
-vector<pair<int, int> > ToPairVector(const HostResultArray<N> & result_array);
+vector<pair<int, int> > ToPairVector(const HostResults<N> & result_array);
 
 void PrintArray(BitSequence<BITS_IN_SEQUENCE> * arr);
 
@@ -187,25 +187,34 @@ template<unsigned long long k>
 class BitSequence
 {
 public:
-	__host__ __device__ BitSequence()
-	{
+	__host__ __device__ BitSequence() {}
 
-	}
+	//Char has 1 byte so 8 bits. Divide by 8 to get the byte with our searched bit,
+	//move it to the right so our bit is the least significant bit of the byte.
+	//Then we can & it with 1 to get the value.
 	__host__ __device__ inline char GetBit(unsigned long long index) const
 	{
-		return (array[index / 64] >> (index % 64)) & 1;
+		return array[index / 8] >> (index % 8) & 1;
 	}
+
+	//Can't write only one bit, have to write whole byte. Get the byte containing our bit , get a mask of it with ones everywhere and zero on the bit spot. After &-ing the mask with the byte we get the same byte, but with 0 in place of our bit.
+	//Afterwards we can & it with a byte containing zeroes everywhere and our desired value in the place of the searched bit to write the correct value in the desired bit spot.
+	//!! makes 0 from 0 and 1 from non-zero
 	__host__ __device__ inline void SetBit(unsigned long long index, char value)
 	{
-		array[index / 64] = (array[index / 64] & (~(1ull << (index % 64)))) | ((!!value) << (index % 64));
+		array[index / 8] = (array[index / 8] & (~(1 << (index % 8)))) | ((!!value) << (index % 8));
 	}
+	
+	//Get a 32-bits long word, so 32/8 = 4 bytes long.
 	__host__ __device__ inline unsigned int *GetWord32(unsigned int word_index)
 	{
-		return (((unsigned int*)array) + word_index);
+		return (unsigned int*)(array + word_index * 32 / 8);
 	}
-	__host__ __device__ inline unsigned long long *GetWord64(unsigned int word_index)
+
+	//Get a 64-bits long word , so 64/8 = 8 bytes long word
+	__host__ __device__ inline unsigned long long *GetWord64(unsigned long long word_index)
 	{
-		return (array + word_index);
+		return (unsigned long long*)(array + word_index * 64 / 8);
 	}
 
 	__host__ __device__ BitSequence(const BitSequence<k> & sequence)
@@ -218,9 +227,10 @@ public:
 		memcpy(array, sequence.array, arSize * 8);
 		return sequence;
 	}
-	static const unsigned long long arSize = (k + 63) / 64;
+	static const unsigned long long arSize = (k / 64 + (!!(k % 64))) * 8;
+
 private:
-	unsigned long long array[arSize];
+	char array[arSize];
 };
 
 __host__ __device__ char compareSequences(BitSequence<BITS_IN_SEQUENCE> * sequence1, BitSequence<BITS_IN_SEQUENCE> * sequence2)
@@ -469,19 +479,18 @@ vector<pair<int, int> > FindPairsCPU(BitSequence<BITS_IN_SEQUENCE> * sequence)
 	CudaTimer timerCall;
 	timerCall.Start();
 	Hamming1CPU(sequence, odata);
-	float xtime = timerCall.Stop();
-	printf("CPU execution time: %f\n", xtime);
-	vector<pair<int, int> > res = ToPairVector(*odata);
+	float result_time = timerCall.Stop();
+	printf("CPU execution time: %f\n", result_time);
+	vector<pair<int, int> > result = ToPairVector(*odata);
 	delete odata;
-	return res;
+	return result;
 }
 
-__host__ __device__ inline char CompareWords64(const unsigned long long & first, const unsigned long long & second)
+__host__ __device__ inline char CompareWords64(const unsigned long long & first_word, const unsigned long long & second_word)
 {
-	unsigned long long x = first ^ second;
+	unsigned long long xor_result = first_word ^ second_word;
 
-	//printf("x = %llu, f = %llu, s = %llu, res = %d, x&(x-1) = %llu\n", x, first, second, (int)(x > 0? ((x & (x - 1)) ? 2 : 1) : 0), (x & (x - 1)));
-	return (x ? ((x & (x - 1)) ? 2 : 1) : 0);
+	return (xor_result ? ((xor_result & (xor_result - 1)) ? 2 : 1) : 0);
 }
 
 #define WORDS64_IN_SEQUENCE ((BITS_IN_SEQUENCE + 63) / 64)
@@ -543,7 +552,7 @@ __global__ void HammingGPU(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned in
 vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence)
 {
 	BitSequence<BITS_IN_SEQUENCE> *d_idata;
-	DeviceResultArray<INPUT_SEQUENCE_SIZE> d_result;
+	DeviceResults<INPUT_SEQUENCE_SIZE> d_result;
 	CudaTimer timerCall, timerMemory;
 	float xtime, xmtime;
 	unsigned long long inputSize = sizeof(BitSequence<BITS_IN_SEQUENCE>)* INPUT_SEQUENCE_SIZE;
@@ -567,7 +576,7 @@ vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence)
 	}
 	CheckErrors(cudaDeviceSynchronize());
 	xtime = timerCall.Stop();
-	HostResultArray<INPUT_SEQUENCE_SIZE> h_result(d_result.ToHostArray());
+	HostResults<INPUT_SEQUENCE_SIZE> h_result(d_result.ToHostArray());
 	xmtime = timerMemory.Stop();
 	cudaFree(d_idata);
 	printf("GPU Times : execution: %f, with memory: %f\n", xtime, xmtime);
@@ -576,7 +585,7 @@ vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence)
 }
 
 template<unsigned int N>
-vector<pair<int, int> > ToPairVector(const HostResultArray<N> & result_array)
+vector<pair<int, int> > ToPairVector(const HostResults<N> & result_array)
 {
 	vector<pair<int, int> > result;
 	for (int i = 1; i < N; ++i)
@@ -593,21 +602,19 @@ vector<pair<int, int> > ToPairVector(const HostResultArray<N> & result_array)
 	return result;
 }
 
-__host__ __device__ unsigned int* GetPointer(unsigned int **arr, unsigned int row, unsigned int col)
+__host__ __device__ unsigned int* GetPointer(unsigned int **array, unsigned int row, unsigned int col)
 {
-	return arr[row - 1] + col / 32;
+	return array[row - 1] + col / 32;
 }
 
-void PrintArray(BitSequence<BITS_IN_SEQUENCE> * arr)
+void PrintArray(BitSequence<BITS_IN_SEQUENCE> * array)
 {
-	for (int i = 0; i < INPUT_SEQUENCE_SIZE; ++i)
-	{
-		cout << arr[i] << endl;
-	}
+	for (int i = 0; i < INPUT_SEQUENCE_SIZE; ++i)	
+		cout << array[i] << endl;	
 }
 
 void CheckErrors(cudaError_t status)
 {
-	if (cudaSuccess != status)
+	if (status != cudaSuccess)
 		printf("Cuda Error in %s:%d - %s\n", __FILE__, __LINE__, cudaGetErrorString(status));
 }
