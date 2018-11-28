@@ -148,7 +148,7 @@ public:
 __global__ void Hamming1GPU(BitSequence<BITS_IN_SEQUENCE> * d_sequence, BitSequence<COMPARISONS> *d_odata, unsigned long long offset = 0);
 __host__ __device__ char compareSequences(BitSequence<BITS_IN_SEQUENCE> * sequence1, BitSequence<BITS_IN_SEQUENCE> * sequence2);
 __host__ __device__ void k2ij(unsigned long long k, unsigned int * i, unsigned int  * j);
-
+__host__ __device__ unsigned long long ij2k(unsigned int i, unsigned int j);
 void Hamming1CPU(BitSequence<BITS_IN_SEQUENCE> * sequence, BitSequence<COMPARISONS> * odata);
 void PrintComparison(const BitSequence<BITS_IN_SEQUENCE> & gpu_sequence, const BitSequence<BITS_IN_SEQUENCE> & cpu_sequence);
 bool ComparePairs(const vector<pair<int, int> > & gpu_result, const vector<pair<int, int> > & cpu_result);
@@ -159,6 +159,7 @@ vector<pair<int, int> > ToPairVector(const BitSequence<COMPARISONS> & result_seq
 void PrintAsMatrix(const BitSequence<COMPARISONS> & sequence, ostream & stream);
 
 vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence);
+vector<pair<int, int> > FindPairsGPU2(BitSequence<BITS_IN_SEQUENCE> * h_sequence);
 vector<pair<int, int> > FindPairsCPU(BitSequence<BITS_IN_SEQUENCE> * sequence);
 __host__ __device__ unsigned int* GetPointer(unsigned int **arr, unsigned int row, unsigned int col);
 template<unsigned int N>
@@ -169,19 +170,22 @@ void PrintArray(BitSequence<BITS_IN_SEQUENCE> * arr);
 int main()
 {
 	cudaError_t cudaStatus;
-	printf("Sequence generation in progress...");
+	printf("Starting sequence generation...\n");
 	BitSequence<BITS_IN_SEQUENCE>* sequence = GenerateInput();
-	printf("Completed! \n");
+	printf("Ended sequence generation!\n");
 
 	cudaDeviceSetCacheConfig(cudaFuncCachePreferShared);
 
-	auto gpuRes = FindPairsGPU(sequence);
-	cout << "On GPU call found " << gpuRes.size() << " results" << endl;
+	auto gpuRes = FindPairsGPU2(sequence);
+	cout << "On first call found " << gpuRes.size() << " results" << endl;
+	cout.flush();
+	auto gpuRes0 = FindPairsGPU(sequence);
+	cout << "On second call found " << gpuRes0.size() << " results" << endl;
 	cout.flush();
 	auto cpuRes = FindPairsCPU(sequence);
-	cout << "On CPU call found " << cpuRes.size() << " results" << endl;
+	cout << "On third call found " << cpuRes.size() << " results" << endl;
 	//PrintArray(sequence);
-	ComparePairs(gpuRes, cpuRes);
+	//ComparePairs(gpuRes, cpuRes);
 	//ComparePairs(gpuRes0, cpuRes);
 	/*if (equal(gpuRes.begin(), gpuRes.end(), gpuRes0.begin(), gpuRes0.end()))
 	{
@@ -213,23 +217,18 @@ public:
 	{
 
 	}
-	//Char has 1 byte so 8 bits. Divide by 8 to get the byte with our searched bit, move it to the right so our bit is the least significant bit of the byte. Then we can & it with 1 to get the value.
 	__host__ __device__ inline char GetBit(unsigned long long index) const
 	{
 		return (array[index / 64] >> (index % 64)) & 1;
 	}
-	//Can't write one bit, so we have to write whole byte. Get the byte containing our bit , get a mask of it with ones everywhere and zero on the bit spot. After &-ing it with the byte we get it the same byte but with 0 in place of our bit.
-	//Afterwards we can & it with a byte containing zeroes everywhere and our desired value in the place of the searched bit to write the correct value in the desired bit spot. !! makes 0 from 0 and 1 from non-zero
 	__host__ __device__ inline void SetBit(unsigned long long index, char value)
 	{
 		array[index / 64] = (array[index / 64] & (~(1ull << (index % 64)))) | ((!!value) << (index % 64));
 	}
-	//Get a 32-bits long word, so 32/8 = 4 bytes long.
 	__host__ __device__ inline unsigned int *GetWord32(unsigned int word_index)
 	{
 		return (((unsigned int*)array) + word_index);
 	}
-	//Get a 64-bits long word , so 64/8 = 8 bytes long word
 	__host__ __device__ inline unsigned long long *GetWord64(unsigned int word_index)
 	{
 		return (array + word_index);
@@ -245,7 +244,6 @@ public:
 		memcpy(array, sequence.array, arSize * 8);
 		return sequence;
 	}
-	//Array must contain whole 64-bits long words, so we calculate how many are needed.  
 	static const unsigned long long arSize = (k + 63) / 64;
 private:
 	unsigned long long array[arSize];
@@ -260,7 +258,6 @@ __host__ __device__ char compareSequences(BitSequence<BITS_IN_SEQUENCE> * sequen
 		a = *(sequence1->GetWord64(j));
 		b = *(sequence2->GetWord64(j));
 		axorb = a ^ b;
-		//if xor & (xor - 1) == 0 that means that was not a power of 2, so we stop. Otherwise that means there was a difference on exactly one place.
 		diff += axorb == 0 ? 0 : (axorb & (axorb - 1) ? 2 : 1);
 		if (diff > 1)
 		{
@@ -431,8 +428,12 @@ __global__ void Hamming1GPU(BitSequence<BITS_IN_SEQUENCE> * d_sequence, BitSeque
 	unsigned int c, b;
 	k2ij(i, &i1, &i2);
 	c = compareSequences(d_sequence + i1, d_sequence + i2);
+#ifdef LINUX
 	__syncthreads();
 	b = __ballot(c);
+#else
+	b = __ballot_sync(~0, c);
+#endif
 	if (!!(i % 32))
 		*(d_odata->GetWord32(i / 32)) = b;
 }
@@ -481,6 +482,25 @@ vector<pair<int, int> > ToPairVector(const BitSequence<COMPARISONS> & result_seq
 	}
 
 	return result;
+}
+
+void PrintAsMatrix(const BitSequence<COMPARISONS> & sequence, ostream & stream)
+{
+	for (int i = 0; i < INPUT_SEQUENCE_SIZE; ++i)
+	{
+		for (int j = 0; j < INPUT_SEQUENCE_SIZE; ++j)
+		{
+			if (j <= i)
+			{
+				cout << "  ";
+			}
+			else
+			{
+				cout << (short int)sequence.GetBit(ij2k(i, j)) << " ";
+			}
+		}
+		cout << endl;
+	}
 }
 
 vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence)
@@ -603,9 +623,12 @@ __global__ void Hamming2GPUFast(BitSequence<BITS_IN_SEQUENCE> *sequences, unsign
 		unsigned int b;
 		unsigned int seq2_no = row_offset - i;
 		char v = res[i] == 1;
+#ifdef LINUX
 		__syncthreads();
 		b = __ballot(v);
-
+#else
+		b = __ballot_sync(~0, v);
+#endif
 		if (!(seq_no % 32))
 			*(GetPointer(arr, seq2_no, seq_no)) = b;
 	}
@@ -652,16 +675,65 @@ __global__ void Hamming2GPU(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned i
 		unsigned int b;
 		unsigned int seq2_no = row_offset - i;
 		char v = res[i] == 1;
-
+#ifdef LINUX
 		__syncthreads();
 		b = __ballot(v);
-
+#else
+		b = __ballot_sync(~0, v);
+#endif
 		//printf("%d %d %d %d %d\n", seq_no, seq2_no, (int)v, b, (int)res[i]);
 		if (seq2_no > seq_no && !(seq_no % 32))
 		{
 			*(GetPointer(arr, seq2_no, seq_no)) = b;
 		}
 	}
+}
+
+vector<pair<int, int> > FindPairsGPU2(BitSequence<BITS_IN_SEQUENCE> * h_sequence)
+{
+	BitSequence<BITS_IN_SEQUENCE> *d_idata;
+	DeviceResultArray<INPUT_SEQUENCE_SIZE> d_result;
+	CudaTimer timerCall, timerMemory;
+	float xtime, xmtime;
+	unsigned long long inputSize = sizeof(BitSequence<BITS_IN_SEQUENCE>)* INPUT_SEQUENCE_SIZE;
+	timerMemory.Start();
+	//HostResultArray<(unsigned int)INPUT_SEQUENCE_SIZE> h_result;
+	CHECK_ERRORS(cudaMalloc(&d_idata, inputSize));
+	CHECK_ERRORS(cudaMemcpy(d_idata, h_sequence, inputSize, cudaMemcpyHostToDevice));
+	timerCall.Start();
+	unsigned int copied = INPUT_SEQUENCE_SIZE;
+	for (int j = INPUT_SEQUENCE_SIZE - 1; j > 0; j -= SEQUENCES_PER_CALL)
+	{
+		if (j >= THREADS_PER_BLOCK)
+		{
+			Hamming2GPUFast << < j / THREADS_PER_BLOCK, THREADS_PER_BLOCK >> > (d_idata, d_result.arr, j, 0);
+			//CHECK_ERRORS(cudaDeviceSynchronize());
+		}
+		if (j % THREADS_PER_BLOCK > 0)
+		{
+			Hamming2GPU << < 1, j%THREADS_PER_BLOCK >> > (d_idata, d_result.arr, j, j - (j%THREADS_PER_BLOCK));
+			//CHECK_ERRORS_FORMAT(cudaDeviceSynchronize(), "%d %d", j, (j%THREADS_PER_BLOCK));
+		}
+		/*if (j < INPUT_SEQUENCE_SIZE / 2 && copied == INPUT_SEQUENCE_SIZE)
+		{
+			CHECK_ERRORS(cudaDeviceSynchronize());
+			unsigned int start = j - SEQUENCES_PER_CALL > 0 ? j - SEQUENCES_PER_CALL + 1 : 1;
+			unsigned int quantity = SEQUENCES_PER_CALL > j ? j : SEQUENCES_PER_CALL;
+			//cout << j << " " << start << " " << quantity << endl;
+			h_result.CopyRows(d_result, start, copied - j);
+			copied = j;
+		}*/
+	}
+	//h_result.CopyRows(d_result, 1, copied - 1);
+	CHECK_ERRORS(cudaDeviceSynchronize());
+	xtime = timerCall.Stop();
+	HostResultArray<INPUT_SEQUENCE_SIZE> h_result(d_result.ToHostArray());
+	xmtime = timerMemory.Stop();
+	cudaFree(d_idata);
+	printf("GPU Times : execution: %f, with memory: %f\n", xtime, xmtime);
+	//vector<pair<int,int> > res = vector<pair<int, int>>();
+	vector<pair<int, int> > res = ToPairVector(h_result);
+	return res;
 }
 
 template<unsigned int N>
