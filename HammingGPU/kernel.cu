@@ -9,24 +9,9 @@
 
 using namespace std;
 
-#define CHECK_ERRORS(status) do{\
-	if(cudaSuccess != status) {\
-		fprintf(stderr, "Cuda Error in %s:%d - %s\n", __FILE__, __LINE__, cudaGetErrorString(status));\
-	}\
-}while(0)
-
-#define CHECK_ERRORS_FORMAT(status, format, ...) do{\
-	if(cudaSuccess != status) {\
-		fprintf(stderr, "Cuda Error in %s:%d - %s - ", __FILE__, __LINE__, cudaGetErrorString(status));\
-		fprintf(stderr, format, __VA_ARGS__);\
-		fprintf(stderr, "\n");\
-	}\
-}while(0)
-
 #define BITS_IN_SEQUENCE 1000 //Number of bits in one sequence
 #define INPUT_SEQUENCE_SIZE 1000ull //Number of sequences
 #define COMPARISONS (((INPUT_SEQUENCE_SIZE*(INPUT_SEQUENCE_SIZE - 1)) / 2)) //Number of comparisons
-#define MAX_BLOCKS 100000 //Number of maximum blocks per call
 #define THREADS_PER_BLOCK 1024 //Number of threads run in one block
 #define SEQUENCES_PER_CALL 35 //Number of rows taken once per function call
 
@@ -106,38 +91,38 @@ class DeviceResultArray : public ResultArray
 public:
 	DeviceResultArray()
 	{
-		CHECK_ERRORS(cudaMalloc(&arr, sizeof(unsigned int*)*(N - 1)));
+		CheckErrors(cudaMalloc(&arr, sizeof(unsigned int*)*(N - 1)));
 		unsigned int* temp_arr[N - 1];
 		for (int i = 0; i < N - 1; ++i)
 		{
-			CHECK_ERRORS(cudaMalloc(&(temp_arr[i]), sizeof(unsigned int) * (ceil((i + 1) / 32.0))));
-			CHECK_ERRORS(cudaMemset(temp_arr[i], 0, sizeof(unsigned int) * (ceil((i + 1) / 32.0))));
+			CheckErrors(cudaMalloc(&(temp_arr[i]), sizeof(unsigned int) * (ceil((i + 1) / 32.0))));
+			CheckErrors(cudaMemset(temp_arr[i], 0, sizeof(unsigned int) * (ceil((i + 1) / 32.0))));
 		}
-		CHECK_ERRORS(cudaMemcpyAsync(arr, &(temp_arr[0]), sizeof(unsigned int*)*(N - 1), cudaMemcpyHostToDevice));
-		CHECK_ERRORS(cudaDeviceSynchronize());
+		CheckErrors(cudaMemcpyAsync(arr, &(temp_arr[0]), sizeof(unsigned int*)*(N - 1), cudaMemcpyHostToDevice));
+		CheckErrors(cudaDeviceSynchronize());
 	}
 
 	~DeviceResultArray()
 	{
 		unsigned int *temp_arr[N - 1];
-		CHECK_ERRORS(cudaMemcpy(temp_arr, arr, sizeof(unsigned int*)*(N - 1), cudaMemcpyDeviceToHost));
+		CheckErrors(cudaMemcpy(temp_arr, arr, sizeof(unsigned int*)*(N - 1), cudaMemcpyDeviceToHost));
 		for (int i = 0; i < N - 1; i++)
 		{
-			CHECK_ERRORS(cudaFree(temp_arr[i]));
+			CheckErrors(cudaFree(temp_arr[i]));
 		}
-		CHECK_ERRORS(cudaFree(arr));
+		CheckErrors(cudaFree(arr));
 	}
 
 	HostResultArray<N> ToHostArray()
 	{
 		HostResultArray<N> host;
 		unsigned int * temp_arr[N - 1];
-		CHECK_ERRORS(cudaMemcpy(temp_arr, arr, sizeof(unsigned int*)*(N - 1), cudaMemcpyDeviceToHost));
+		CheckErrors(cudaMemcpy(temp_arr, arr, sizeof(unsigned int*)*(N - 1), cudaMemcpyDeviceToHost));
 		for (int i = 0; i < N - 1; ++i)
 		{
-			CHECK_ERRORS(cudaMemcpyAsync(host.arr[i], temp_arr[i], sizeof(unsigned int) * (unsigned int)(ceil((i + 1) / 32.0)), cudaMemcpyDeviceToHost));
+			CheckErrors(cudaMemcpyAsync(host.arr[i], temp_arr[i], sizeof(unsigned int) * (unsigned int)(ceil((i + 1) / 32.0)), cudaMemcpyDeviceToHost));
 		}
-		CHECK_ERRORS(cudaDeviceSynchronize());
+		CheckErrors(cudaDeviceSynchronize());
 		return host;
 	}
 };
@@ -158,7 +143,7 @@ void PrintAsMatrix(const BitSequence<COMPARISONS> & sequence, ostream & stream);
 vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence);
 vector<pair<int, int> > FindPairsCPU(BitSequence<BITS_IN_SEQUENCE> * sequence);
 __host__ __device__ unsigned int* GetPointer(unsigned int **arr, unsigned int row, unsigned int col);
-
+void CheckErrors(cudaError_t status);
 template<unsigned int N>
 vector<pair<int, int> > ToPairVector(const HostResultArray<N> & result_array);
 
@@ -178,7 +163,7 @@ int main()
 	auto resultsGPU = FindPairsGPU(sequence);
 	printf("Completed!\n");
 
-	printf("Starting searching for pairs of sequences with Hamming distance equal 1 on GPU...\n");
+	printf("Starting searching for pairs of sequences with Hamming distance equal 1 on CPU...\n");
 	auto resultsCPU = FindPairsCPU(sequence);
 	printf("Completed!\n");
 
@@ -499,54 +484,8 @@ __host__ __device__ inline char CompareWords64(const unsigned long long & first,
 
 #define WORDS64_IN_SEQUENCE ((BITS_IN_SEQUENCE + 63) / 64)
 
-__global__ void Hamming2GPUFast(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned int **arr, unsigned int row_offset, unsigned int column_offset)
-{
-	unsigned int tid = threadIdx.x + blockIdx.x * blockDim.x;
-	unsigned int seq_no = tid + column_offset;
-	char res[SEQUENCES_PER_CALL];
-	memset(res, 0, SEQUENCES_PER_CALL * sizeof(char));
 
-	BitSequence<BITS_IN_SEQUENCE> & s = *(sequences + seq_no);
-	__shared__ BitSequence<BITS_IN_SEQUENCE> ar[SEQUENCES_PER_CALL];
-	for (unsigned int offset = 0; offset < SEQUENCES_PER_CALL * WORDS64_IN_SEQUENCE; offset += blockDim.x)
-	{
-		unsigned int oid = threadIdx.x + offset;
-		if (oid < SEQUENCES_PER_CALL * WORDS64_IN_SEQUENCE)
-		{
-			*(ar[oid / WORDS64_IN_SEQUENCE].GetWord64(oid % WORDS64_IN_SEQUENCE)) =
-				*((sequences + row_offset - oid / WORDS64_IN_SEQUENCE)->GetWord64(oid % WORDS64_IN_SEQUENCE));
-			//printf("Thread %d wrote %llu\n", oid, *(ar[oid / WORDS64_IN_SEQUENCE].GetWord64(oid % WORDS64_IN_SEQUENCE)));
-		}
-	}
-	__syncthreads();
-	for (int j = 0; j < WORDS64_IN_SEQUENCE; ++j)
-	{
-		unsigned long long sf = *(s.GetWord64(j));
-		for (int i = 0; i < SEQUENCES_PER_CALL; ++i)
-		{
-			//unsigned int seq2_no = row_offset - i;
-			if (res[i] <= 1)
-			{
-				char r = CompareWords64(sf, *(ar[i].GetWord64(j)));
-				res[i] += r;
-			}
-		}
-	}
-	for (int i = 0; i < SEQUENCES_PER_CALL; ++i)
-	{
-		unsigned int b;
-		unsigned int seq2_no = row_offset - i;
-		char v = res[i] == 1;
-
-		__syncthreads();
-		b = __ballot(v);
-
-		if (!(seq_no % 32))
-			*(GetPointer(arr, seq2_no, seq_no)) = b;
-	}
-}
-
-__global__ void Hamming2GPU(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned int **arr, unsigned int row_offset, unsigned int column_offset)
+__global__ void HammingGPU(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned int **arr, unsigned int row_offset, unsigned int column_offset)
 {
 	unsigned int tid = threadIdx.x + blockIdx.x * blockDim.x;
 	unsigned int seq_no = tid + column_offset;
@@ -607,41 +546,29 @@ vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence)
 	float xtime, xmtime;
 	unsigned long long inputSize = sizeof(BitSequence<BITS_IN_SEQUENCE>)* INPUT_SEQUENCE_SIZE;
 	timerMemory.Start();
-	//HostResultArray<(unsigned int)INPUT_SEQUENCE_SIZE> h_result;
-	CHECK_ERRORS(cudaMalloc(&d_idata, inputSize));
-	CHECK_ERRORS(cudaMemcpy(d_idata, h_sequence, inputSize, cudaMemcpyHostToDevice));
+	CheckErrors(cudaMalloc(&d_idata, inputSize));
+	CheckErrors(cudaMemcpy(d_idata, h_sequence, inputSize, cudaMemcpyHostToDevice));
 	timerCall.Start();
-	unsigned int copied = INPUT_SEQUENCE_SIZE;
 	for (int j = INPUT_SEQUENCE_SIZE - 1; j > 0; j -= SEQUENCES_PER_CALL)
 	{
 		if (j >= THREADS_PER_BLOCK)
 		{
-			Hamming2GPU << < j / THREADS_PER_BLOCK, THREADS_PER_BLOCK >> > (d_idata, d_result.arr, j, 0);
-			//CHECK_ERRORS(cudaDeviceSynchronize());
+			HammingGPU << < j / THREADS_PER_BLOCK, THREADS_PER_BLOCK >> > (d_idata, d_result.arr, j, 0);			
 		}
-		if (j % THREADS_PER_BLOCK > 0)
+		// Same as j % THREADS_PER_BLOCK > 0
+		if (j % THREADS_PER_BLOCK)
 		{
-			Hamming2GPU << < 1, j%THREADS_PER_BLOCK >> > (d_idata, d_result.arr, j, j - (j%THREADS_PER_BLOCK));
-			//CHECK_ERRORS_FORMAT(cudaDeviceSynchronize(), "%d %d", j, (j%THREADS_PER_BLOCK));
+			HammingGPU << < 1, j % THREADS_PER_BLOCK >> > (d_idata, d_result.arr, j, j - (j%THREADS_PER_BLOCK));
+			
 		}
-		/*if (j < INPUT_SEQUENCE_SIZE / 2 && copied == INPUT_SEQUENCE_SIZE)
-		{
-			CHECK_ERRORS(cudaDeviceSynchronize());
-			unsigned int start = j - SEQUENCES_PER_CALL > 0 ? j - SEQUENCES_PER_CALL + 1 : 1;
-			unsigned int quantity = SEQUENCES_PER_CALL > j ? j : SEQUENCES_PER_CALL;
-			//cout << j << " " << start << " " << quantity << endl;
-			h_result.CopyRows(d_result, start, copied - j);
-			copied = j;
-		}*/
+		
 	}
-	//h_result.CopyRows(d_result, 1, copied - 1);
-	CHECK_ERRORS(cudaDeviceSynchronize());
+	CheckErrors(cudaDeviceSynchronize());
 	xtime = timerCall.Stop();
 	HostResultArray<INPUT_SEQUENCE_SIZE> h_result(d_result.ToHostArray());
 	xmtime = timerMemory.Stop();
 	cudaFree(d_idata);
 	printf("GPU Times : execution: %f, with memory: %f\n", xtime, xmtime);
-	//vector<pair<int,int> > res = vector<pair<int, int>>();
 	vector<pair<int, int> > res = ToPairVector(h_result);
 	return res;
 }
@@ -675,4 +602,10 @@ void PrintArray(BitSequence<BITS_IN_SEQUENCE> * arr)
 	{
 		cout << arr[i] << endl;
 	}
+}
+
+void CheckErrors(cudaError_t status)
+{
+	if (cudaSuccess != status)
+		printf("Cuda Error in %s:%d - %s\n", __FILE__, __LINE__, cudaGetErrorString(status));
 }
