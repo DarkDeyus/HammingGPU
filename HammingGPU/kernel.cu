@@ -1,11 +1,13 @@
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
+#include <time.h>
 #include <random>
 #include <stdio.h>
 #include <iostream>
 #include <vector>
 #include <cmath>
 #include <algorithm>
+#include <bitset>
 
 using namespace std;
 
@@ -140,7 +142,6 @@ bool ComparePairs(const vector<pair<int, int> > & gpu_result, const vector<pair<
 ostream & operator<<(ostream & out, SequenceOfBits<BITS_IN_SEQUENCE> & sequence);
 SequenceOfBits<BITS_IN_SEQUENCE> * GenerateInput();
 vector<pair<int, int> > ToPairVector(const SequenceOfBits<COMPARISONS> & result_sequence);
-void PrintAsMatrix(const SequenceOfBits<COMPARISONS> & sequence, ostream & stream);
 
 vector<pair<int, int> > FindPairsGPU(SequenceOfBits<BITS_IN_SEQUENCE> * h_sequence);
 vector<pair<int, int> > FindPairsCPU(SequenceOfBits<BITS_IN_SEQUENCE> * sequence);
@@ -171,7 +172,7 @@ int main()
 
 	printf("Comparing GPU results with CPU results...\n");
 	ComparePairs(resultsGPU, resultsCPU);
-
+	PrintArray(sequence);
 	// cudaDeviceReset must be called before exiting in order for profiling and
 	// tracing tools such as Nsight and Visual Profiler to show complete traces.
 	cudaStatus = cudaDeviceReset();
@@ -415,27 +416,23 @@ ostream & operator<<(ostream & out, SequenceOfBits<BITS_IN_SEQUENCE> & sequence)
 
 SequenceOfBits<BITS_IN_SEQUENCE> * GenerateInput()
 {
-
+	mt19937_64 source;
+	int seed = random_device()();
+	source.seed(seed);
 	SequenceOfBits<BITS_IN_SEQUENCE> * result = new SequenceOfBits<BITS_IN_SEQUENCE>[INPUT_SEQUENCE_SIZE];
 
 	memset(result, 0, sizeof(SequenceOfBits<BITS_IN_SEQUENCE>) * INPUT_SEQUENCE_SIZE);
-
-	//generate it 32 bits at the time
-	/*for (int i = 0; i < result->array_size ; ++i)
-	{
-		*(result[i].Get64BitsWord(i)) = i;
-	}*/
-
+	
 	for (int i = 0; i < INPUT_SEQUENCE_SIZE; i++)
 	{
-		*(result[i].Get32BitsWord(0)) = i;
-		/*for (int j = 0; j < BITS_IN_SEQUENCE / 32; j++)
+		//generate it 64 bits at the time
+		for (int j = 0; j < SequenceOfBits<BITS_IN_SEQUENCE>::array_size / 8 - 1; ++j)
 		{
-			*(r[i].GetWord32(j)) = rand() + rand()*RAND_MAX;
+			*(result[i].Get64BitsWord(j)) = source();
 		}
-		if(BITS_IN_SEQUENCE % 32)
-			*(r[i].GetWord32(BITS_IN_SEQUENCE / 32)) = (rand() + rand()*RAND_MAX)%(1<<(BITS_IN_SEQUENCE%32));*/
-	}
+		//last word can be not full, so we generate in separately. We move the 64bit word so we are left with only the required number of set bits and with the rest of them set to 0
+		*(result[i].Get64BitsWord(BITS_IN_SEQUENCE / 64)) = source() >> (64 - (BITS_IN_SEQUENCE % 64));
+	}	
 
 	return result;
 }
@@ -456,24 +453,6 @@ vector<pair<int, int> > ToPairVector(const SequenceOfBits<COMPARISONS> & result_
 	return result;
 }
 
-void PrintAsMatrix(const SequenceOfBits<COMPARISONS> & sequence, ostream & stream)
-{
-	for (int i = 0; i < INPUT_SEQUENCE_SIZE; ++i)
-	{
-		for (int j = 0; j < INPUT_SEQUENCE_SIZE; ++j)
-		{
-			if (j <= i)
-			{
-				cout << "  ";
-			}
-			else
-			{
-				cout << (short int)sequence.GetBit(ij2k(i, j)) << " ";
-			}
-		}
-		cout << endl;
-	}
-}
 
 vector<pair<int, int> > FindPairsCPU(SequenceOfBits<BITS_IN_SEQUENCE> * sequence)
 {
