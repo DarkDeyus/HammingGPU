@@ -20,10 +20,10 @@ template<unsigned long long k>
 class SequenceOfBits;
 
 //Number of bits per sequence
-const unsigned long long sequence_length = 1000;
+const unsigned long long sequence_length = 10000;
 
 //Number of sequences
-const unsigned long long input_sequence_count = 1000ull;
+const unsigned long long input_sequence_count = 100000ull;
 const unsigned long long comparisons = (((input_sequence_count*(input_sequence_count - 1)) / 2));
 
 ostream & operator<<(ostream & out, SequenceOfBits<sequence_length> & sequence);
@@ -186,6 +186,7 @@ int main()
 	cudaDeviceSetCacheConfig(cudaFuncCachePreferShared);
 
 	printf("Generation sequence in progress...");
+	cout.flush();
 	SequenceOfBits<sequence_length>* sequence = GenerateInput();
 	printf("Completed!\n");
 	
