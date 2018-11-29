@@ -133,8 +133,7 @@ public:
 __host__ __device__ char compareSequences(SequenceOfBits<BITS_IN_SEQUENCE> * sequence1, SequenceOfBits<BITS_IN_SEQUENCE> * sequence2);
 __host__ __device__ void k2ij(unsigned long long k, unsigned int * i, unsigned int  * j);
 __host__ __device__ unsigned long long ij2k(unsigned int i, unsigned int j);
-void Hamming1CPU(SequenceOfBits<BITS_IN_SEQUENCE> * sequence, SequenceOfBits<COMPARISONS> * odata);
-void PrintComparison(const SequenceOfBits<BITS_IN_SEQUENCE> & gpu_sequence, const SequenceOfBits<BITS_IN_SEQUENCE> & cpu_sequence);
+void HammingCPU(SequenceOfBits<BITS_IN_SEQUENCE> * sequence, SequenceOfBits<COMPARISONS> * odata);
 bool ComparePairs(const vector<pair<int, int> > & gpu_result, const vector<pair<int, int> > & cpu_result);
 
 ostream & operator<<(ostream & out, SequenceOfBits<BITS_IN_SEQUENCE> & sequence);
@@ -235,28 +234,35 @@ private:
 	char array[array_size];
 };
 
-__host__ __device__ char compareSequences(SequenceOfBits<BITS_IN_SEQUENCE> * sequence1, SequenceOfBits<BITS_IN_SEQUENCE> * sequence2)
+__host__ __device__ char compareSequences(SequenceOfBits<BITS_IN_SEQUENCE> * first_sequence, SequenceOfBits<BITS_IN_SEQUENCE> * second_sequence)
 {
 	int difference_count = 0;
-	for (int j = 0; j < (BITS_IN_SEQUENCE + 63) / 64; ++j)
+	//Words are 64bits, and (BITS_IN_SEQUENCE + 63) / 64 works as ceil(BITS_IN_SEQUENCE/64)
+	for (int i = 0; i < (BITS_IN_SEQUENCE + 63) / 64; ++i)
 	{
-		unsigned long long int a, b, xor_result;
-		a = *(sequence1->Get64BitsWord(j));
-		b = *(sequence2->Get64BitsWord(j));
+		unsigned long long int first_word, second_word, xor_result;
+		first_word = *(first_sequence->Get64BitsWord(i));
+		second_word = *(second_sequence->Get64BitsWord(i));
 
-		xor_result = a ^ b;
+		xor_result = first_word ^ second_word;
+		//if xor_result & (xor_result - 1) == 0 that means that was not a power of 2, so we stop. Otherwise that means there was a difference on exactly one place.
 		difference_count += xor_result == 0 ? 0 : (xor_result & (xor_result - 1) ? 2 : 1);
-		if (difference_count > 1)
-		{
+
+		if (difference_count > 1)		
 			return 0;
-		}
+		
 	}
+	//returns 0 if difference_count = 0 and 1 otherwise
 	return !!difference_count;
 }
 
+//Function to get the (x, y) coordinates from a N x N matrix based on the index. We care only about what is above the main diagonal.
+//On the main diagonal we have a comparison with themselfs (H(a, a) = 0 ), and below it we have duplicates, as H(a, b) == H(b, a).
 __host__ __device__ void k2ij(unsigned long long k, unsigned int * i, unsigned int  * j)
 {
+	//adding 1 to k to skip first result
 	*i = (unsigned int)ceil((0.5 * (-1 + sqrt(1 + 8 * (k + 1)))));
+	//decreasing 1 from j , as we start from 0 not 1
 	*j = (unsigned int)((k + 1) - 0.5 * (*i) * ((unsigned long long)(*i) - 1)) - 1;
 }
 
@@ -265,39 +271,41 @@ __host__ __device__ unsigned long long ij2k(unsigned int i, unsigned int j)
 	return ((unsigned long long)i) * (i - 1) / 2 + j;
 }
 
-void Hamming1CPU(SequenceOfBits<BITS_IN_SEQUENCE> * sequence, SequenceOfBits<COMPARISONS> * odata)
+void HammingCPU(SequenceOfBits<BITS_IN_SEQUENCE> * sequence, SequenceOfBits<COMPARISONS> * odata)
 {
-	unsigned long long numberOfComparisons = COMPARISONS;
-	int i1 = 1, i2 = 0;
-	for (unsigned long long k = 0; k < numberOfComparisons / 32; ++k)
+	int x = 1, y = 0;
+	for (unsigned long long k = 0; k < COMPARISONS / 32; ++k)
 	{
 		unsigned int result = 0;
-		for (int i = 0; i < 32; i++)
+		for (int i = 0; i < 32; ++i)
 		{
-			result |= (unsigned int)(compareSequences(sequence + i1, sequence + i2)) << i;
-			++i2;
-			if (i2 == i1)
+			//Setting the result one bit at the time. compareSequences returns 0 or 1, so we set the value in the correct place in the result.
+			result |= (unsigned int)(compareSequences(sequence + x, sequence + y)) << i;
+			++y;
+			if (y == x)
 			{
-				++i1;
-				i2 = 0;
+				++x;
+				y = 0;
 			}
 		}
 		*(odata->Get32BitsWord(k)) = result;
 	}
-	if (numberOfComparisons % 32)
+	//Something left, not a whole word
+	if (COMPARISONS % 32)
 	{
 		unsigned int result = 0;
-		for (int i = 0; i < numberOfComparisons % 32; i++)
+		for (int i = 0; i < COMPARISONS % 32; i++)
 		{
-			result |= (unsigned int)(compareSequences(sequence + i1, sequence + i2)) << i;
-			++i2;
-			if (i2 == i1)
+			result |= (unsigned int)(compareSequences(sequence + x, sequence + y)) << i;
+			++y;
+			if (y == x)
 			{
-				++i1;
-				i2 = 0;
+				++x;
+				y = 0;
 			}
 		}
-		*(odata->Get32BitsWord(numberOfComparisons / 32)) = result;
+		//on the missing places there will be zeroes
+		*(odata->Get32BitsWord(COMPARISONS / 32)) = result;
 	}
 }
 
@@ -340,18 +348,6 @@ private:
 	cudaEvent_t start, stop;
 };
 
-void PrintComparison(const SequenceOfBits<BITS_IN_SEQUENCE> & gpu_sequence, const SequenceOfBits<BITS_IN_SEQUENCE> & cpu_sequence)
-{
-	for (unsigned long long i = 0; i < INPUT_SEQUENCE_SIZE*(INPUT_SEQUENCE_SIZE - 1) / 2; ++i)
-	{
-		if (cpu_sequence.GetBit(i) != gpu_sequence.GetBit(i))
-		{
-			unsigned int i1, i2;
-			k2ij(i, &i1, &i2);
-			cout << "Difference on comparison number " << i << " (" << i1 << ", " << i2 << ") GPU " << (short int)gpu_sequence.GetBit(i) << " CPU " << (short int)cpu_sequence.GetBit(i) << endl;
-		}
-	}
-}
 
 bool ComparePairs(const vector<pair<int, int> > & gpu_result, const vector<pair<int, int> > & cpu_result)
 {
@@ -475,7 +471,7 @@ vector<pair<int, int> > FindPairsCPU(SequenceOfBits<BITS_IN_SEQUENCE> * sequence
 	odata = new SequenceOfBits<COMPARISONS>();
 	CudaTimer timerCall;
 	timerCall.Start();
-	Hamming1CPU(sequence, odata);
+	HammingCPU(sequence, odata);
 	float result_time = timerCall.Stop();
 	printf("CPU execution time: %f\n", result_time);
 	vector<pair<int, int> > result = ToPairVector(*odata);
