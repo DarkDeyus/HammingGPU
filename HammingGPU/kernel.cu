@@ -26,13 +26,13 @@ class CudaTimer;
 
 template<unsigned int N>
 class DeviceResults;
-
 class Results
 {
 public:
-	unsigned int **arr;
+	unsigned int **result_array;
 };
 
+//Host holds the array
 template<unsigned int N>
 class HostResults : public Results
 {
@@ -40,104 +40,129 @@ public:
 
 	HostResults()
 	{
-		arr = new unsigned int* [N - 1];
+		//N - 1 is equal to the number of rows. No need to create row with 0 fields
+		result_array = new unsigned int* [N - 1];
 
 		for (int i = 0; i < N - 1; i++)
 		{
-			arr[i] = new unsigned int[(int)(ceil((i + 1) / 32.0))];
+			//Results are from ballot, which returns 32bits. That is why we are counting how many full 32bit words we need for each row 
+			int number_of_words = (int)(ceil((i + 1) / 32.0));			
+			result_array[i] = new unsigned int[number_of_words];
 		}
 	}
 
 	~HostResults()
 	{
-		if (arr == nullptr)
+		if (result_array == nullptr)
 			return;
 
 		for (int i = 0; i < N - 1; i++)
 		{
-			delete[] arr[i];
+			delete[] result_array[i];
 		}
 
-		delete[] arr;
-	}
-
-	HostResults<N>&& operator=(HostResults<N> &&h_result)
-	{
-		this->arr = h_result.arr;
-		h_result.arr = nullptr;
-	}
-
-	HostResults(HostResults<N> &&h_result)
-	{
-		this->arr = h_result.arr;
-		h_result.arr = nullptr;
-	}
-
-	void CopyRows(const DeviceResults<N> & array, unsigned int start, unsigned int quantity)
-	{
-		unsigned int **temp_arr = new unsigned int*[quantity];
-		cudaMemcpy(temp_arr, array.arr + start - 1, quantity * sizeof(unsigned int*), cudaMemcpyDeviceToHost);
-		for (int i = 0; i < quantity; ++i)
-		{
-			cudaMemcpyAsync(arr[start - 1 + i], temp_arr[i], sizeof(unsigned int) * (int)(ceil((start + i) / 32.0)), cudaMemcpyDeviceToHost);
-		}
-		delete[] temp_arr;
+		delete[] result_array;
 	}
 
 	char GetBit(unsigned int row, unsigned int col) const
 	{
-		return (char)(arr[row - 1][col / 32] >> (col % 32) & 1);
+		//We never use row 0 , as it is left down triangle matrix without main diagonal, so row 0 is empty. No need to create it then
+		//We hold each column in one bit, so we need to get it by & with 1 moved to the correct spot
+		return (char)(result_array[row - 1][col / 32] >> (col % 32) & 1);
 	}
+
+	void CopyRows(const DeviceResults<N> & array, unsigned int beginning, unsigned int count)
+	{
+		unsigned int **temp_array = new unsigned int*[count];
+
+		
+		cudaMemcpy(temp_array, array.result_array + beginning - 1, count * sizeof(unsigned int*), cudaMemcpyDeviceToHost);
+		//calculate how many full 32bit words we need and create array with the size of it
+		for (int i = 0; i < count; ++i)
+		{
+			int number_of_words = (int)(ceil((beginning + i) / 32.0));
+			cudaMemcpyAsync(result_array[beginning - 1 + i], temp_array[i], sizeof(unsigned int) * number_of_words, cudaMemcpyDeviceToHost);
+		}
+			
+
+		delete[] temp_array;
+	}
+
+	HostResults(HostResults<N> &&h_result)
+	{
+		this->result_array = h_result.result_array;
+		h_result.result_array = nullptr;
+	}
+
+	HostResults<N>&& operator=(HostResults<N> &&h_result)
+	{
+		this->result_array = h_result.result_array;
+		h_result.result_array = nullptr;
+	}
+
+	
 };
 
+//similar like HostResults, but for device . Device copies their result to it after they finish checking
 template<unsigned int N>
 class DeviceResults : public Results
 {
 public:
-	DeviceResults()
-	{
-		CheckErrors(cudaMalloc(&arr, sizeof(unsigned int*)*(N - 1)));
-		unsigned int* temp_arr[N - 1];
-		for (int i = 0; i < N - 1; ++i)
-		{
-			CheckErrors(cudaMalloc(&(temp_arr[i]), sizeof(unsigned int) * (ceil((i + 1) / 32.0))));
-			CheckErrors(cudaMemset(temp_arr[i], 0, sizeof(unsigned int) * (ceil((i + 1) / 32.0))));
-		}
-		CheckErrors(cudaMemcpyAsync(arr, &(temp_arr[0]), sizeof(unsigned int*)*(N - 1), cudaMemcpyHostToDevice));
-		CheckErrors(cudaDeviceSynchronize());
-	}
-
-	~DeviceResults()
-	{
-		unsigned int *temp_arr[N - 1];
-		CheckErrors(cudaMemcpy(temp_arr, arr, sizeof(unsigned int*)*(N - 1), cudaMemcpyDeviceToHost));
-		for (int i = 0; i < N - 1; i++)
-		{
-			CheckErrors(cudaFree(temp_arr[i]));
-		}
-		CheckErrors(cudaFree(arr));
-	}
 
 	HostResults<N> ToHostArray()
 	{
 		HostResults<N> host;
-		unsigned int * temp_arr[N - 1];
-		CheckErrors(cudaMemcpy(temp_arr, arr, sizeof(unsigned int*)*(N - 1), cudaMemcpyDeviceToHost));
+		unsigned int * temporal[N - 1];
+		CheckErrors(cudaMemcpy(temporal, result_array, sizeof(unsigned int*)*(N - 1), cudaMemcpyDeviceToHost));
 		for (int i = 0; i < N - 1; ++i)
 		{
-			CheckErrors(cudaMemcpyAsync(host.arr[i], temp_arr[i], sizeof(unsigned int) * (unsigned int)(ceil((i + 1) / 32.0)), cudaMemcpyDeviceToHost));
+			unsigned int number_of_words = (unsigned int)(ceil((i + 1) / 32.0));
+			CheckErrors(cudaMemcpyAsync(host.result_array[i], temporal[i], sizeof(unsigned int) * number_of_words , cudaMemcpyDeviceToHost));
 		}
 		CheckErrors(cudaDeviceSynchronize());
 		return host;
 	}
+
+	DeviceResults()
+	{
+		//N - 1 is equal to the number of rows. No need to create row with 0 fields
+		CheckErrors(cudaMalloc(&result_array, sizeof(unsigned int* ) * (N - 1)));
+
+		unsigned int* temporal[N - 1];
+		for (int i = 0; i < N - 1; ++i)
+		{
+			double length = (ceil((i + 1) / 32.0));
+			CheckErrors(cudaMalloc(&(temporal[i]), sizeof(unsigned int) * length));
+			CheckErrors(cudaMemset(temporal[i], 0, sizeof(unsigned int) * length));
+		}
+		CheckErrors(cudaMemcpyAsync(result_array, &(temporal[0]), sizeof(unsigned int*)*(N - 1), cudaMemcpyHostToDevice));
+		CheckErrors(cudaDeviceSynchronize());
+	}
+
+	
+
+	~DeviceResults()
+	{
+		unsigned int *temp_arr[N - 1];
+		CheckErrors(cudaMemcpy(temp_arr, result_array, sizeof(unsigned int*) * (N - 1), cudaMemcpyDeviceToHost));
+		for (int i = 0; i < N - 1; i++)
+		{
+			CheckErrors(cudaFree(temp_arr[i]));
+		}
+		CheckErrors(cudaFree(result_array));
+	}
 };
+
+
+
+
 
 
 __host__ __device__ char compareSequences(SequenceOfBits<BITS_IN_SEQUENCE> * sequence1, SequenceOfBits<BITS_IN_SEQUENCE> * sequence2);
 __host__ __device__ void k2ij(unsigned long long k, unsigned int * i, unsigned int  * j);
 __host__ __device__ unsigned long long ij2k(unsigned int i, unsigned int j);
 void HammingCPU(SequenceOfBits<BITS_IN_SEQUENCE> * sequence, SequenceOfBits<COMPARISONS> * odata);
-bool ComparePairs(const vector<pair<int, int> > & gpu_result, const vector<pair<int, int> > & cpu_result);
+bool CompareResults(const vector<pair<int, int> > & gpu_result, const vector<pair<int, int> > & cpu_result);
 
 ostream & operator<<(ostream & out, SequenceOfBits<BITS_IN_SEQUENCE> & sequence);
 SequenceOfBits<BITS_IN_SEQUENCE> * GenerateInput();
@@ -148,9 +173,14 @@ vector<pair<int, int> > FindPairsCPU(SequenceOfBits<BITS_IN_SEQUENCE> * sequence
 __host__ __device__ unsigned int* GetPointer(unsigned int **array, unsigned int row, unsigned int col);
 
 template<unsigned int N>
-vector<pair<int, int> > ToPairVector(const HostResults<N> & result_array);
+vector<pair<int, int> > GetResultPairs(const HostResults<N> & result_array);
 
-void PrintArray(SequenceOfBits<BITS_IN_SEQUENCE> * arr);
+void PrintSequences(SequenceOfBits<BITS_IN_SEQUENCE> * arr);
+
+
+
+
+
 
 int main()
 {
@@ -171,8 +201,8 @@ int main()
 	printf("Completed!\n");
 
 	printf("Comparing GPU results with CPU results...\n");
-	ComparePairs(resultsGPU, resultsCPU);
-	PrintArray(sequence);
+	CompareResults(resultsGPU, resultsCPU);
+	//PrintSequences(sequence);
 	// cudaDeviceReset must be called before exiting in order for profiling and
 	// tracing tools such as Nsight and Visual Profiler to show complete traces.
 	cudaStatus = cudaDeviceReset();
@@ -351,21 +381,28 @@ private:
 };
 
 
-bool ComparePairs(const vector<pair<int, int> > & gpu_result, const vector<pair<int, int> > & cpu_result)
+bool CompareResults(const vector<pair<int, int>>& gpu_result, const vector<pair<int, int> > & cpu_result)
 {
-	unsigned long long gpu_pair_count = gpu_result.size(), cpu_pair_count = cpu_result.size();
-	unsigned long long n = gpu_pair_count < cpu_pair_count ? gpu_pair_count : cpu_pair_count;
+	unsigned long long shorter_vector_length;
+	unsigned long long cpu_pair_count = cpu_result.size();
+	unsigned long long gpu_pair_count = gpu_result.size();
 
-	vector<pair<int, int> > result_gpu(gpu_result);
-	vector<pair<int, int> > result_cpu(cpu_result);
+	if (gpu_pair_count < cpu_pair_count)
+		shorter_vector_length = gpu_pair_count;
+	else
+		shorter_vector_length = cpu_pair_count;
 
-	//sorting to make sure the pairs are in the same order.
-	sort(result_gpu.begin(), result_gpu.end());
+	vector<pair<int, int>> result_gpu(gpu_result);
+	vector<pair<int, int>> result_cpu(cpu_result);
+
+	//sorting to make sure the pairs are in the same order, to be able to compare the.
 	sort(result_cpu.begin(), result_cpu.end());
+	sort(result_gpu.begin(), result_gpu.end());
+	
 
 	const vector<pair<int, int> > & longer_vector = cpu_pair_count > gpu_pair_count ? result_cpu : result_gpu;
 	bool equal = true;
-
+	
 	if (gpu_pair_count != cpu_pair_count)
 	{
 		cout << "Number of elements in both results is not equal (GPU: " << gpu_pair_count << ", CPU: " << cpu_pair_count << ") !" << endl;
@@ -378,13 +415,13 @@ bool ComparePairs(const vector<pair<int, int> > & gpu_result, const vector<pair<
 
 	//need to have access to the last number that was checked
 	int i = 0;
-	for (; i < n; ++i)
+	for (; i < shorter_vector_length; ++i)
 	{
 		if (result_gpu[i] != result_cpu[i])
 		{
-			cout << "Difference on pair number " << i << "; GPU Pair: (" << result_gpu[i].first << ", " << result_gpu[i].second << ") CPU Pair: ("
-				<< result_cpu[i].first << ", " << result_cpu[i].second << ")" << endl;
 			equal = false;
+			cout << "Difference on pair number " << i << "; GPU Pair: (" << result_gpu[i].first << ", " << result_gpu[i].second << ") CPU Pair: ("
+				<< result_cpu[i].first << ", " << result_cpu[i].second << ")" << endl;			
 		}		
 
 	}
@@ -403,7 +440,11 @@ bool ComparePairs(const vector<pair<int, int> > & gpu_result, const vector<pair<
 	return equal;
 }
 
-
+//We never use row 0 , as it is left down triangle matrix, row 0 either contains comparison with themself (0, 0) or duplicates. No need to create it then.
+__host__ __device__ unsigned int* GetPointer(unsigned int **array, unsigned int row, unsigned int col)
+{
+	return array[row - 1] + col / 32;
+}
 
 ostream & operator<<(ostream & out, SequenceOfBits<BITS_IN_SEQUENCE> & sequence)
 {
@@ -439,18 +480,18 @@ SequenceOfBits<BITS_IN_SEQUENCE> * GenerateInput()
 
 vector<pair<int, int> > ToPairVector(const SequenceOfBits<COMPARISONS> & result_sequence)
 {
-	vector<pair<int, int> > result;
+	vector<pair<int, int> > resultVector;
 	for (unsigned long long k = 0; k < COMPARISONS; k++)
 	{
 		if (result_sequence.GetBit(k))
 		{
 			unsigned int i, j;
 			k2ij(k, &i, &j);
-			result.push_back(make_pair(i, j));
+			resultVector.push_back(make_pair(i, j));
 		}
 	}
 
-	return result;
+	return resultVector;
 }
 
 
@@ -543,12 +584,12 @@ vector<pair<int, int> > FindPairsGPU(SequenceOfBits<BITS_IN_SEQUENCE> * h_sequen
 	{
 		if (j >= THREADS_PER_BLOCK)
 		{
-			HammingGPU << < j / THREADS_PER_BLOCK, THREADS_PER_BLOCK >> > (d_idata, d_result.arr, j, 0);			
+			HammingGPU << < j / THREADS_PER_BLOCK, THREADS_PER_BLOCK >> > (d_idata, d_result.result_array, j, 0);
 		}
 		// Same as j % THREADS_PER_BLOCK > 0
 		if (j % THREADS_PER_BLOCK)
 		{
-			HammingGPU << < 1, j % THREADS_PER_BLOCK >> > (d_idata, d_result.arr, j, j - (j%THREADS_PER_BLOCK));
+			HammingGPU << < 1, j % THREADS_PER_BLOCK >> > (d_idata, d_result.result_array, j, j - (j%THREADS_PER_BLOCK));
 			
 		}
 		
@@ -559,12 +600,12 @@ vector<pair<int, int> > FindPairsGPU(SequenceOfBits<BITS_IN_SEQUENCE> * h_sequen
 	xmtime = timerMemory.Stop();
 	cudaFree(d_idata);
 	printf("GPU Times : execution: %f, with memory: %f\n", xtime, xmtime);
-	vector<pair<int, int> > res = ToPairVector(h_result);
+	vector<pair<int, int> > res = GetResultPairs(h_result);
 	return res;
 }
 
 template<unsigned int N>
-vector<pair<int, int> > ToPairVector(const HostResults<N> & result_array)
+vector<pair<int, int> > GetResultPairs(const HostResults<N> & result_array)
 {
 	vector<pair<int, int> > result;
 	for (int i = 1; i < N; ++i)
@@ -581,15 +622,16 @@ vector<pair<int, int> > ToPairVector(const HostResults<N> & result_array)
 	return result;
 }
 
-__host__ __device__ unsigned int* GetPointer(unsigned int **array, unsigned int row, unsigned int col)
-{
-	return array[row - 1] + col / 32;
-}
 
-void PrintArray(SequenceOfBits<BITS_IN_SEQUENCE> * array)
+
+void PrintSequences(SequenceOfBits<BITS_IN_SEQUENCE> * array)
 {
-	for (int i = 0; i < INPUT_SEQUENCE_SIZE; ++i)	
-		cout << array[i] << endl;	
+	for (int i = 0; i < INPUT_SEQUENCE_SIZE; ++i)
+	{
+		cout << array[i] << endl;
+		printf("\n");
+	}
+		
 }
 
 void CheckErrors(cudaError_t status)
