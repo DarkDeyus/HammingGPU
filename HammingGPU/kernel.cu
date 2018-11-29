@@ -1,6 +1,6 @@
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
-
+#include <random>
 #include <stdio.h>
 #include <iostream>
 #include <vector>
@@ -14,6 +14,7 @@ using namespace std;
 #define COMPARISONS (((INPUT_SEQUENCE_SIZE*(INPUT_SEQUENCE_SIZE - 1)) / 2)) //Number of comparisons
 #define THREADS_PER_BLOCK 1024 //Number of threads run in one block
 #define SEQUENCES_PER_CALL 35 //Number of rows taken once per function call
+#define WORDS64_IN_SEQUENCE ((BITS_IN_SEQUENCE + 63) / 64)
 
 void CheckErrors(cudaError_t status);
 
@@ -351,56 +352,53 @@ private:
 
 bool ComparePairs(const vector<pair<int, int> > & gpu_result, const vector<pair<int, int> > & cpu_result)
 {
-	unsigned long long gsize = gpu_result.size(), csize = cpu_result.size();
-	unsigned long long n = gsize < csize ? gsize : csize;
+	unsigned long long gpu_pair_count = gpu_result.size(), cpu_pair_count = cpu_result.size();
+	unsigned long long n = gpu_pair_count < cpu_pair_count ? gpu_pair_count : cpu_pair_count;
 
-	vector<pair<int, int> > gpu_res(gpu_result);
-	vector<pair<int, int> > cpu_res(cpu_result);
-	sort(gpu_res.begin(), gpu_res.end());
-	sort(cpu_res.begin(), cpu_res.end());
+	vector<pair<int, int> > result_gpu(gpu_result);
+	vector<pair<int, int> > result_cpu(cpu_result);
 
-	const vector<pair<int, int> > & gv = csize > gsize ? cpu_res : gpu_res;
+	//sorting to make sure the pairs are in the same order.
+	sort(result_gpu.begin(), result_gpu.end());
+	sort(result_cpu.begin(), result_cpu.end());
+
+	const vector<pair<int, int> > & longer_vector = cpu_pair_count > gpu_pair_count ? result_cpu : result_gpu;
 	bool equal = true;
 
-	if (gsize != csize)
+	if (gpu_pair_count != cpu_pair_count)
 	{
-		cout << "Number of elements is not equal (GPU: " << gsize << ", CPU: " << csize << ") !" << endl;
+		cout << "Number of elements in both results is not equal (GPU: " << gpu_pair_count << ", CPU: " << cpu_pair_count << ") !" << endl;
 		equal = false;
 	}
 	else
 	{
-		cout << "Number of elements are equal (GPU: " << gsize << ", CPU: " << csize << ")" << endl;
+		cout << "Number of elements in both result is equal (GPU: " << gpu_pair_count << ", CPU: " << cpu_pair_count << ")" << endl;
 	}
 
-	int i;
-	for (i = 0; i < n; ++i)
+	//need to have access to the last number that was checked
+	int i = 0;
+	for (; i < n; ++i)
 	{
-		if (gpu_res[i] != cpu_res[i])
+		if (result_gpu[i] != result_cpu[i])
 		{
-			cout << "Difference on " << i << ": GPU: (" << gpu_res[i].first << ", " << gpu_res[i].second << ") CPU: ("
-				<< cpu_res[i].first << ", " << cpu_res[i].second << ")" << endl;
+			cout << "Difference on pair number " << i << "; GPU Pair: (" << result_gpu[i].first << ", " << result_gpu[i].second << ") CPU Pair: ("
+				<< result_cpu[i].first << ", " << result_cpu[i].second << ")" << endl;
 			equal = false;
-		}
-		else
-		{
-			//cout << "Pair " << i << ": GPU: (" << gpu_res[i].first << ", " << gpu_res[i].second << ") CPU: ("
-			//		<< cpu_res[i].first << ", " << cpu_res[i].second << ")" << endl;
-
-		}
+		}		
 
 	}
-	if (csize != gsize)
+	if (cpu_pair_count != gpu_pair_count)
 	{
-		cout << "Rest pairs on " << ((csize > gsize) ? "CPU" : "GPU") << ":" << endl;
-		for (; i < gv.size(); ++i)
+		cout << "Remaining pairs from " << ((cpu_pair_count > gpu_pair_count) ? "CPU" : "GPU") << " result:" << endl;
+		for (; i < longer_vector.size(); ++i)
 		{
-			cout << "(" << gv[i].first << ", " << gv[i].second << ")" << endl;
+			cout << "(" << longer_vector[i].first << ", " << longer_vector[i].second << ")" << endl;
 		}
 	}
+
 	if (equal)
-	{
-		cout << "Results are the same" << endl;
-	}
+		printf("Results are the same!\n");
+
 	return equal;
 }
 
@@ -417,17 +415,29 @@ ostream & operator<<(ostream & out, SequenceOfBits<BITS_IN_SEQUENCE> & sequence)
 
 SequenceOfBits<BITS_IN_SEQUENCE> * GenerateInput()
 {
-	srand(2018);
 
-	SequenceOfBits<BITS_IN_SEQUENCE> * r = new SequenceOfBits<BITS_IN_SEQUENCE>[INPUT_SEQUENCE_SIZE];
+	SequenceOfBits<BITS_IN_SEQUENCE> * result = new SequenceOfBits<BITS_IN_SEQUENCE>[INPUT_SEQUENCE_SIZE];
 
-	memset(r, 0, sizeof(SequenceOfBits<BITS_IN_SEQUENCE>)*INPUT_SEQUENCE_SIZE);
+	memset(result, 0, sizeof(SequenceOfBits<BITS_IN_SEQUENCE>) * INPUT_SEQUENCE_SIZE);
+
+	//generate it 32 bits at the time
+	/*for (int i = 0; i < result->array_size ; ++i)
+	{
+		*(result[i].Get64BitsWord(i)) = i;
+	}*/
 
 	for (int i = 0; i < INPUT_SEQUENCE_SIZE; i++)
 	{
-		*(r[i].Get32BitsWord(0)) = i;
+		*(result[i].Get32BitsWord(0)) = i;
+		/*for (int j = 0; j < BITS_IN_SEQUENCE / 32; j++)
+		{
+			*(r[i].GetWord32(j)) = rand() + rand()*RAND_MAX;
+		}
+		if(BITS_IN_SEQUENCE % 32)
+			*(r[i].GetWord32(BITS_IN_SEQUENCE / 32)) = (rand() + rand()*RAND_MAX)%(1<<(BITS_IN_SEQUENCE%32));*/
 	}
-	return r;
+
+	return result;
 }
 
 vector<pair<int, int> > ToPairVector(const SequenceOfBits<COMPARISONS> & result_sequence)
@@ -481,7 +491,7 @@ vector<pair<int, int> > FindPairsCPU(SequenceOfBits<BITS_IN_SEQUENCE> * sequence
 
 
 
-#define WORDS64_IN_SEQUENCE ((BITS_IN_SEQUENCE + 63) / 64)
+
 
 
 __global__ void HammingGPU(SequenceOfBits<BITS_IN_SEQUENCE> *sequences, unsigned int **arr, unsigned int row_offset, unsigned int column_offset)
