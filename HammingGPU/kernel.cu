@@ -18,7 +18,6 @@ bool CompareResults(const vector<pair<int, int> > & gpu_result, const vector<pai
 
 template<unsigned long long k>
 class SequenceOfBits;
-class CudaTimer;
 
 //Number of bits per sequence
 const unsigned long long sequence_length = 1000;
@@ -314,8 +313,8 @@ void HammingCPU(SequenceOfBits<sequence_length> * sequence, SequenceOfBits<compa
 			++y;
 			if (y == x)
 			{
-				++x;
 				y = 0;
+				++x;			
 			}
 		}
 		*(odata->Get32BitsWord(k)) = result;
@@ -324,59 +323,21 @@ void HammingCPU(SequenceOfBits<sequence_length> * sequence, SequenceOfBits<compa
 	if (comparisons % 32)
 	{
 		unsigned int result = 0;
+		//on the missing places there will be zeroes
 		for (int i = 0; i < comparisons % 32; i++)
 		{
 			result |= (unsigned int)(compareSequences(sequence + x, sequence + y)) << i;
 			++y;
 			if (y == x)
 			{
-				++x;
 				y = 0;
+				++x;				
 			}
 		}
-		//on the missing places there will be zeroes
+		
 		*(odata->Get32BitsWord(comparisons / 32)) = result;
 	}
 }
-
-class CudaTimer
-{
-public:
-	CudaTimer()
-	{
-		cudaEventCreate(&start);
-		cudaEventCreate(&stop);
-		started = false;
-	}
-
-	~CudaTimer()
-	{
-		cudaEventDestroy(start);
-		cudaEventDestroy(stop);
-	}
-
-	void Start()
-	{
-		started = true;
-		cudaEventRecord(start);
-		cudaEventSynchronize(start);
-	}
-
-	float Stop()
-	{
-		if (!started)
-			return -1.0f;
-		float ms;
-		cudaEventRecord(stop);
-		cudaEventSynchronize(stop);
-		cudaEventElapsedTime(&ms, start, stop);
-		started = false;
-		return ms;
-	}
-private:
-	bool started;
-	cudaEvent_t start, stop;
-};
 
 
 bool CompareResults(const vector<pair<int, int>>& gpu_result, const vector<pair<int, int> > & cpu_result)
@@ -492,17 +453,25 @@ vector<pair<int, int> > ToPairVector(const SequenceOfBits<comparisons> & result_
 	return resultVector;
 }
 
-
 vector<pair<int, int> > FindPairsCPU(SequenceOfBits<sequence_length> * sequence)
 {
 	SequenceOfBits<comparisons> *odata;
 	odata = new SequenceOfBits<comparisons>();
-	CudaTimer timerCall;
-	timerCall.Start();
+	cudaEvent_t start, stop;
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+
+	cudaEventRecord(start);
+	cudaEventSynchronize(start);
+
 	HammingCPU(sequence, odata);
-	float result_time = timerCall.Stop();
+
+	cudaEventRecord(stop);
+	cudaEventSynchronize(stop);
+	float result_time;
+	cudaEventElapsedTime(&result_time, start, stop); 
 	printf("CPU execution time: %f\n", result_time);
-	vector<pair<int, int> > result = ToPairVector(*odata);
+	vector<pair<int, int>> result = ToPairVector(*odata);
 	delete odata;
 	return result;
 }
@@ -512,57 +481,58 @@ vector<pair<int, int> > FindPairsCPU(SequenceOfBits<sequence_length> * sequence)
 
 
 
-__global__ void HammingGPU(SequenceOfBits<sequence_length> *sequences, unsigned int **arr, unsigned int row_offset, unsigned int column_offset)
+__global__ void HammingGPU(SequenceOfBits<sequence_length> *sequences, unsigned int **array, unsigned int row_offset, unsigned int column_offset)
 {
-	unsigned int tid = threadIdx.x + blockIdx.x * blockDim.x;
-	unsigned int seq_no = tid + column_offset;
-	char res[rows_per_call];
-	char m = rows_per_call > row_offset ? row_offset : rows_per_call;
-	memset(res, 0, rows_per_call * sizeof(char));
+	unsigned int sequence_number = threadIdx.x + blockIdx.x * blockDim.x + column_offset;
 
-	SequenceOfBits<sequence_length> & s = *(sequences + seq_no);
-	__shared__ SequenceOfBits<sequence_length> ar[rows_per_call];
-	for (unsigned int offset = 0; offset < m * words64bits_in_sequence; offset += blockDim.x)
+	char result[rows_per_call];
+	//if we are 
+	char limiter;
+	
+	if (rows_per_call > row_offset)
+		limiter = row_offset;
+	else
+		limiter = rows_per_call;
+
+	memset(result, 0, rows_per_call * sizeof(char));
+
+	SequenceOfBits<sequence_length> & sequence1 = *(sequences + sequence_number);
+
+	__shared__ SequenceOfBits<sequence_length> shared_array[rows_per_call];
+
+	for (unsigned int offset = 0; offset < limiter * words64bits_in_sequence; offset += blockDim.x)
 	{
-		unsigned int oid = threadIdx.x + offset;
-		if (oid < m * words64bits_in_sequence)
-		{
-			*(ar[oid / words64bits_in_sequence].Get64BitsWord(oid % words64bits_in_sequence)) =
-				*((sequences + row_offset - oid / words64bits_in_sequence)->Get64BitsWord(oid % words64bits_in_sequence));
-			//printf("Thread %d wrote %llu\n", oid, *(ar[oid / words64bits_in_sequence].Get64BitsWord(oid % words64bits_in_sequence)));
-		}
+		unsigned int new_id = threadIdx.x + offset;
+		if (new_id < limiter * words64bits_in_sequence)
+			*(shared_array[new_id / words64bits_in_sequence].Get64BitsWord(new_id % words64bits_in_sequence)) =	*((sequences + row_offset - new_id / words64bits_in_sequence)->Get64BitsWord(new_id % words64bits_in_sequence));		
 	}
 	__syncthreads();
+	//Comparing not whole, but 64bits at the time.
 	for (int j = 0; j < words64bits_in_sequence; ++j)
 	{
-		unsigned long long sf = *(s.Get64BitsWord(j));
-		for (int i = 0; i < m; ++i)
-		{
-			//unsigned int seq2_no = row_offset - i;
-			if (res[i] <= 1)
+		unsigned long long sequence_part = *(sequence1.Get64BitsWord(j));
+		for (int i = 0; i < limiter; ++i)
+		{			
+			if (result[i] <= 1)
 			{
-				unsigned long long s = *(ar[i].Get64BitsWord(j));
-
-				unsigned long long xor_result = sf ^ s;
-				char r = (xor_result ? ((xor_result & (xor_result - 1)) ? 2 : 1) : 0);
-				//printf("%d %d %d %d % d\n", seq2_no, seq_no, j, i, r);
-				res[i] += r;
+				unsigned long long part = *(shared_array[i].Get64BitsWord(j));
+				unsigned long long xor_result = sequence_part ^ part;
+				result[i] += (xor_result ? ((xor_result & (xor_result - 1)) ? 2 : 1) : 0);
 			}
 		}
 	}
-	for (int i = 0; i < m; ++i)
+
+	for (int i = 0; i < limiter; ++i)
 	{
-		unsigned int b;
 		unsigned int seq2_no = row_offset - i;
-		char v = res[i] == 1;
 
 		__syncthreads();
-		b = __ballot(v);
+		unsigned int b = __ballot(result[i] == 1);
 
-		//printf("%d %d %d %d %d\n", seq_no, seq2_no, (int)v, b, (int)res[i]);
-		if (seq2_no > seq_no && !(seq_no % 32))
+		//printf("%d %d %d %d %d\n", sequence_number, seq2_no, (int)v, b, (int)result[i]);
+		if (seq2_no > sequence_number && !(sequence_number % 32))
 		{
-			*(GetPointer(arr, seq2_no, seq_no)) = b;
+			*(GetPointer(array, seq2_no, sequence_number)) = b;
 		}
 	}
 }
@@ -571,35 +541,52 @@ vector<pair<int, int> > FindPairsGPU(SequenceOfBits<sequence_length> * h_sequenc
 {
 	SequenceOfBits<sequence_length> *d_idata;
 	DeviceResults<input_sequence_count> d_result;
-	CudaTimer timerCall, timerMemory;
-	float xtime, xmtime;
+	cudaEvent_t start_memory, stop_memory, start_execution, stop_execution;
+	cudaEventCreate(&start_memory);	
+	cudaEventCreate(&start_execution);
+	cudaEventCreate(&stop_memory);
+	cudaEventCreate(&stop_execution);
+	float execution_time, memory_time;
+
 	unsigned long long inputSize = sizeof(SequenceOfBits<sequence_length>)* input_sequence_count;
-	timerMemory.Start();
+
+	cudaEventRecord(start_memory);
+	cudaEventSynchronize(start_memory);
+
 	CheckErrors(cudaMalloc(&d_idata, inputSize));
 	CheckErrors(cudaMemcpy(d_idata, h_sequence, inputSize, cudaMemcpyHostToDevice));
-	timerCall.Start();
+	cudaEventRecord(start_execution);
+	cudaEventSynchronize(start_execution);
 	for (int j = input_sequence_count - 1; j > 0; j -= rows_per_call)
 	{
 		if (j >= threads_in_block)
 		{
+			//start as many full blocks as you can
 			HammingGPU << < j / threads_in_block, threads_in_block >> > (d_idata, d_result.result_array, j, 0);
 		}
-		// Same as j % threads_in_block > 0
+
+		// Start the last block, which won't be full
 		if (j % threads_in_block)
 		{
 			HammingGPU << < 1, j % threads_in_block >> > (d_idata, d_result.result_array, j, j - (j%threads_in_block));
-			
+
 		}
-		
+
 	}
 	CheckErrors(cudaDeviceSynchronize());
-	xtime = timerCall.Stop();
+	cudaEventRecord(stop_execution);
+	cudaEventSynchronize(stop_execution);
+	cudaEventElapsedTime(&execution_time, start_execution, stop_execution);
+
 	HostResults<input_sequence_count> h_result(d_result.ToHostArray());
-	xmtime = timerMemory.Stop();
+
+	cudaEventRecord(stop_memory);
+	cudaEventSynchronize(stop_memory);
+	cudaEventElapsedTime(&memory_time, start_memory, stop_memory);
+
 	cudaFree(d_idata);
-	printf("GPU Times : execution: %f, with memory: %f\n", xtime, xmtime);
-	vector<pair<int, int> > res = GetResultPairs(h_result);
-	return res;
+	printf("GPU Times : Only execution: %f, including copying to memory : %f\n", execution_time, memory_time);
+	return GetResultPairs(h_result);
 }
 
 template<unsigned int N>
